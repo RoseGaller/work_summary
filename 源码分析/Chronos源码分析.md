@@ -1,5 +1,6 @@
 # Chronos源码分析
 
+* [概述](#概述)
 * [启动入口](#启动入口)
   * [创建ChronosServerWatcher](#创建chronosserverwatcher)
   * [创建ChronosServer](#创建chronosserver)
@@ -13,6 +14,8 @@
   * [获取单个时间戳](#获取单个时间戳)
   * [获取范围时间戳](#获取范围时间戳)
 
+
+# 概述
 
 Chronos，是实现高可用、高性能、提供全局唯一而且严格单调递增timestamp的服务。
 Chronos采用主备架构，依赖Zookeeper，主服务器挂了以后备服务器迅速感知并接替服务，从而实现系统的高可用。
