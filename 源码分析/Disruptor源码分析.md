@@ -1,3 +1,24 @@
+# Disruptor源码分析
+
+* [概述](#概述)
+* [WorkerPool](#workerpool)
+  * [创建WorkerPool](#创建workerpool)
+  * [创建RingBuffer](#创建ringbuffer)
+  * [填充环形数组](#填充环形数组)
+  * [发布事件](#发布事件)
+  * [启动消费者](#启动消费者)
+  * [消费者处理逻辑](#消费者处理逻辑)
+* [消费者等待策略](#消费者等待策略)
+  * [YieldingWaitStrategy](#yieldingwaitstrategy)
+  * [SleepingWaitStrategy](#sleepingwaitstrategy)
+  * [TimeoutBlockingWaitStrategy](#timeoutblockingwaitstrategy)
+  * [PhasedBackoffWaitStrategy](#phasedbackoffwaitstrategy)
+      * [LockBlockingStrategy](#lockblockingstrategy)
+    * [SleepBlockingStrategy](#sleepblockingstrategy)
+  * [BlockingWaitStrategy](#blockingwaitstrategy)
+  * [BusySpinWaitStrategy](#busyspinwaitstrategy)
+
+
 # 概述
 
 1、环形数组，数组长度必须是的2的次方，方便位运算，计算数组下标。初始化时会对数组填充对象，对象可以重复使用，避免了频繁的创建销毁。数组会被分配连续内存存储对象，可以很好利用空间局部性原理。
