@@ -1,3 +1,39 @@
+# Dledger源码分析
+
+* [启动流程](#启动流程)
+  * [构造DLedgerServer](#构造dledgerserver)
+    * [构造MemberState](#构造memberstate)
+    * [创建DLedgerStore](#创建dledgerstore)
+    * [创建DLedgerRpcNettyService](#创建dledgerrpcnettyservice)
+    * [创建DLedgerEntryPusher](#创建dledgerentrypusher)
+    * [创建DLedgerLeaderElector](#创建dledgerleaderelector)
+  * [启动DLedgerServer](#启动dledgerserver)
+    * [启动DLedgerStore](#启动dledgerstore)
+    * [启动DLedgerRpcService](#启动dledgerrpcservice)
+    * [启动DLedgerEntryPusher](#启动dledgerentrypusher)
+    * [启动DLedgerLeaderElector](#启动dledgerleaderelector)
+* [Leader](#leader)
+  * [EntryDispatcher](#entrydispatcher)
+    * [对比数据](#对比数据)
+      * [主从数据一致](#主从数据一致)
+      * [截断文件](#截断文件)
+    * [追加数据](#追加数据)
+      * [重发数据](#重发数据)
+      * [同步数据](#同步数据)
+  * [handleAppend](#handleappend)
+    * [写本地磁盘](#写本地磁盘)
+    * [等待过半节点的ACK](#等待过半节点的ack)
+  * [QuorumAckChecker](#quorumackchecker)
+  * [Preferred Leader](#preferred-leader)
+* [Follower](#follower)
+  * [接收push请求](#接收push请求)
+  * [执行push请求](#执行push请求)
+    * [handleDoAppend](#handledoappend)
+    * [handleDoCompare](#handledocompare)
+    * [handleDoTruncate](#handledotruncate)
+    * [handleDoCommit](#handledocommit)
+
+
 # 启动流程
 
 ```java
