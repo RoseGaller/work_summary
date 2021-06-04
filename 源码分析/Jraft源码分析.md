@@ -2427,6 +2427,513 @@ public void onApplied(final long appliedIndex) {
 }
 ```
 
+# 扩容
+
+## 添加follower节点
+
+com.alipay.sofa.jraft.core.NodeImpl#addPeer
+
+```java
+public void addPeer(final PeerId peer, final Closure done) {//添加follower节点
+    Requires.requireNonNull(peer, "Null peer");
+    this.writeLock.lock();
+    try {
+        Requires.requireTrue(!this.conf.getConf().contains(peer), "Peer already exists in current configuration");
+				//创建新的配置
+        final Configuration newConf = new Configuration(this.conf.getConf());
+        newConf.addPeer(peer); //新增的节点
+        unsafeRegisterConfChange(this.conf.getConf(), newConf, done);
+    } finally {
+        this.writeLock.unlock();
+    }
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl#unsafeRegisterConfChange
+
+```java
+private void unsafeRegisterConfChange(final Configuration oldConf, final Configuration newConf, final Closure done) {
+
+    Requires.requireTrue(newConf.isValid(), "Invalid new conf: %s", newConf);
+    // The new conf entry(will be stored in log manager) should be valid
+    Requires.requireTrue(new ConfigurationEntry(null, newConf, oldConf).isValid(), "Invalid conf entry: %s",newConf);
+
+    if (this.state != State.STATE_LEADER) { //判断是否仍是leader节点
+        LOG.warn("Node {} refused configuration changing as the state={}.", getNodeId(), this.state);
+        if (done != null) {
+            final Status status = new Status();
+            if (this.state == State.STATE_TRANSFERRING) {
+                status.setError(RaftError.EBUSY, "Is transferring leadership.");
+            } else {
+                status.setError(RaftError.EPERM, "Not leader");
+            }
+            Utils.runClosureInThread(done, status);
+        }
+        return;
+    }
+  	//STAGE_CATCHING_UP -> STAGE_JOINT->STAGE_STABLE
+    if (this.confCtx.isBusy()) { //检查当前的配置变更
+        LOG.warn("Node {} refused configuration concurrent changing.", getNodeId());
+        if (done != null) {
+            Utils.runClosureInThread(done, new Status(RaftError.EBUSY, "Doing another configuration change."));
+        }
+        return;
+    }
+  
+    // Return immediately when the new peers equals to current configuration
+    if (this.conf.getConf().equals(newConf)) { //配置没有发生变更
+        Utils.runClosureInThread(done);
+        return;
+    }
+    this.confCtx.start(oldConf, newConf, done);
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.ConfigurationCtx#start
+
+```java
+void start(final Configuration oldConf, final Configuration newConf, final Closure done) {
+    if (isBusy()) {
+        if (done != null) {
+            Utils.runClosureInThread(done, new Status(RaftError.EBUSY, "Already in busy stage."));
+        }
+        throw new IllegalStateException("Busy stage");
+    }
+    if (this.done != null) {
+        if (done != null) {
+            Utils.runClosureInThread(done, new Status(RaftError.EINVAL, "Already have done closure."));
+        }
+        throw new IllegalArgumentException("Already have done closure");
+    }
+    this.done = done;
+    this.stage = Stage.STAGE_CATCHING_UP; //修改stage为STAGE_CATCHING_UP
+    this.oldPeers = oldConf.listPeers();
+    this.newPeers = newConf.listPeers();
+    this.oldLearners = oldConf.listLearners();
+    this.newLearners = newConf.listLearners();
+    final Configuration adding = new Configuration();
+    final Configuration removing = new Configuration();
+    newConf.diff(oldConf, adding, removing);
+    this.nchanges = adding.size() + removing.size();
+
+    addNewLearners();
+    if (adding.isEmpty()) {
+        nextStage();
+        return;
+    }
+    addNewPeers(adding); 	//添加follower节点
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.ConfigurationCtx#addNewPeers
+
+```java
+private void addNewPeers(final Configuration adding) {//添加follower节点
+    this.addingPeers = adding.listPeers();
+    LOG.info("Adding peers: {}.", this.addingPeers);
+    for (final PeerId newPeer : this.addingPeers) {
+        if (!this.node.replicatorGroup.addReplicator(newPeer)) { //同步数据
+            LOG.error("Node {} start the replicator failed, peer={}.", this.node.getNodeId(), newPeer);
+            onCaughtUp(this.version, newPeer, false);
+            return;
+        }
+        final OnCaughtUp caughtUp = new OnCaughtUp(this.node, this.node.currTerm, newPeer, this.version);
+        final long dueTime = Utils.nowMs() + this.node.options.getElectionTimeoutMs();
+      	//catchupMargin:默认1000，主从同步的差距小于1000时，将变更的配置同步至集群中的其他节点
+        if (!this.node.replicatorGroup.waitCaughtUp(newPeer, this.node.options.getCatchupMargin(), dueTime, caughtUp)) {
+            LOG.error("Node {} waitCaughtUp, peer={}.", this.node.getNodeId(), newPeer);
+            onCaughtUp(this.version, newPeer, false);
+            return;
+        }
+    }
+}
+```
+
+com.alipay.sofa.jraft.core.ReplicatorGroupImpl#waitCaughtUp
+
+```java
+public boolean waitCaughtUp(final PeerId peer, final long maxMargin, final long dueTime, final CatchUpClosure done) {
+    final ThreadId rid = this.replicatorMap.get(peer);
+    if (rid == null) {
+        return false;
+    }
+		//等待同步差距小于1000
+    Replicator.waitForCaughtUp(rid, maxMargin, dueTime, done);
+    return true;
+}
+```
+
+com.alipay.sofa.jraft.core.Replicator#waitForCaughtUp
+
+```java
+public static void waitForCaughtUp(final ThreadId id, final long maxMargin, final long dueTime,
+                                   final CatchUpClosure done) {
+    final Replicator r = (Replicator) id.lock();
+
+    if (r == null) {
+        Utils.runClosureInThread(done, new Status(RaftError.EINVAL, "No such replicator"));
+        return;
+    }
+    try {
+        if (r.catchUpClosure != null) { //之前的wait_for_caught_up尚未完成
+            LOG.error("Previous wait_for_caught_up is not over");
+            Utils.runClosureInThread(done, new Status(RaftError.EINVAL, "Duplicated call"));
+            return;
+        }
+        done.setMaxMargin(maxMargin); //默认1000
+        if (dueTime > 0) {
+            done.setTimer(r.timerManager.schedule(() -> onCatchUpTimedOut(id), dueTime - Utils.nowMs(),TimeUnit.MILLISECONDS)); //设置延迟任务，触发超时事件
+        }
+        r.catchUpClosure = done;
+    } finally {
+        id.unlock();
+    }
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.OnCaughtUp#run
+
+```java
+public void run(final Status status) {//主从同步的差距小于1000时，会执行此方法
+    this.node.onCaughtUp(this.peer, this.term, this.version, status);
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl#onCaughtUp
+
+```java
+private void onCaughtUp(final PeerId peer, final long term, final long version, final Status st) { //leader每次给follower同步完数据之后，都会执行此方法
+    this.writeLock.lock();
+    try {
+        // check current_term and state to avoid ABA problem
+        if (term != this.currTerm && this.state != State.STATE_LEADER) { //发生了leader变更
+            // term has changed and nothing should be done, otherwise there will be
+            // an ABA problem.
+            return;
+        }
+        if (st.isOk()) { //追赶成功
+            // Caught up successfully
+            this.confCtx.onCaughtUp(version, peer, true);
+            return;
+        }
+        // 如果节点仍然存活，重试
+        if (st.getCode() == RaftError.ETIMEDOUT.getNumber()
+            && Utils.monotonicMs() - this.replicatorGroup.getLastRpcSendTimestamp(peer) <= this.options .getElectionTimeoutMs()) {
+            LOG.debug("Node {} waits peer {} to catch up.", getNodeId(), peer);
+            final OnCaughtUp caughtUp = new OnCaughtUp(this, term, peer, version);
+            final long dueTime = Utils.nowMs() + this.options.getElectionTimeoutMs();
+            if (this.replicatorGroup.waitCaughtUp(peer, this.options.getCatchupMargin(), dueTime, caughtUp)) {
+                return;
+            }
+            LOG.warn("Node {} waitCaughtUp failed, peer={}.", getNodeId(), peer);
+        }
+        LOG.warn("Node {} caughtUp failed, status={}, peer={}.", getNodeId(), st, peer);
+        this.confCtx.onCaughtUp(version, peer, false);
+    } finally {
+        this.writeLock.unlock();
+    }
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.ConfigurationCtx#onCaughtUp
+
+```java
+void onCaughtUp(final long version, final PeerId peer, final boolean success) {
+    if (version != this.version) {
+        LOG.warn("Ignore onCaughtUp message, mismatch configuration context version, expect {}, but is {}.",
+            this.version, version);
+        return;
+    }
+    Requires.requireTrue(this.stage == Stage.STAGE_CATCHING_UP, "Stage is not in STAGE_CATCHING_UP");
+    if (success) { //追赶成功
+        this.addingPeers.remove(peer);
+        if (this.addingPeers.isEmpty()) {
+            nextStage();
+            return;
+        }
+        return;
+    }
+    LOG.warn("Node {} fail to catch up peer {} when trying to change peers from {} to {}.",
+        this.node.getNodeId(), peer, this.oldPeers, this.newPeers);
+    reset(new Status(RaftError.ECATCHUP, "Peer %s failed to catch up.", peer));
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.ConfigurationCtx#nextStage
+
+```java
+void nextStage() {
+    Requires.requireTrue(isBusy(), "Not in busy stage");
+    switch (this.stage) {
+        case STAGE_CATCHING_UP:
+            if (this.nchanges > 1) {
+                this.stage = Stage.STAGE_JOINT; //修改状态
+                this.node.unsafeApplyConfiguration(new Configuration(this.newPeers, this.newLearners),
+                    new Configuration(this.oldPeers), false);
+                return;
+            }
+            // Skip joint consensus since only one peers has been changed here. Make
+            // it a one-stage change to be compatible with the legacy
+            // implementation.
+        case STAGE_JOINT:
+            this.stage = Stage.STAGE_STABLE;
+            this.node.unsafeApplyConfiguration(new Configuration(this.newPeers, this.newLearners), null, false);
+            break;
+        case STAGE_STABLE:
+            final boolean shouldStepDown = !this.newPeers.contains(this.node.serverId);
+            reset(new Status());
+            if (shouldStepDown) {
+                this.node.stepDown(this.node.currTerm, true, new Status(RaftError.ELEADERREMOVED,
+                    "This node was removed."));
+            }
+            break;
+        case STAGE_NONE:
+            // noinspection ConstantConditions
+            Requires.requireTrue(false, "Can't reach here");
+            break;
+    }
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl#unsafeApplyConfiguration
+
+```java
+private void unsafeApplyConfiguration(final Configuration newConf, final Configuration oldConf,
+                                      final boolean leaderStart) {
+    Requires.requireTrue(this.confCtx.isBusy(), "ConfigurationContext is not busy");
+    final LogEntry entry = new LogEntry(EnumOutter.EntryType.ENTRY_TYPE_CONFIGURATION);
+    entry.setId(new LogId(0, this.currTerm));
+    entry.setPeers(newConf.listPeers());
+    entry.setLearners(newConf.listLearners());
+    if (oldConf != null) {
+        entry.setOldPeers(oldConf.listPeers());
+        entry.setOldLearners(oldConf.listLearners());
+    }
+    final ConfigurationChangeDone configurationChangeDone = new ConfigurationChangeDone(this.currTerm, leaderStart);
+    // Use the new_conf to deal the quorum of this very log
+    if (!this.ballotBox.appendPendingTask(newConf, oldConf, configurationChangeDone)) {
+        Utils.runClosureInThread(configurationChangeDone, new Status(RaftError.EINTERNAL, "Fail to append task."));
+        return;
+    }
+    final List<LogEntry> entries = new ArrayList<>();
+    entries.add(entry);
+  	//写磁盘、同步至从节点
+    this.logManager.appendEntries(entries, new LeaderStableClosure(entries));
+    checkAndSetConfiguration(false);
+}
+```
+
+# Leader转让
+
+### Leader节点处理转让
+
+com.alipay.sofa.jraft.core.NodeImpl#transferLeadershipTo
+
+```java
+public Status transferLeadershipTo(final PeerId peer) {
+    Requires.requireNonNull(peer, "Null peer");
+    this.writeLock.lock();
+    try {
+      	//当前节点必须是leader节点
+        if (this.state != State.STATE_LEADER) { 
+            LOG.warn("Node {} can't transfer leadership to peer {} as it is in state {}.", getNodeId(), peer,
+                this.state);
+            return new Status(this.state == State.STATE_TRANSFERRING ? RaftError.EBUSY : RaftError.EPERM,
+                    "Not a leader");
+        }
+        if (this.confCtx.isBusy()) { //配置发生了变更
+            LOG.warn(
+                "Node {} refused to transfer leadership to peer {} when the leader is changing the configuration.",
+                getNodeId(), peer);
+            return new Status(RaftError.EBUSY, "Changing the configuration");
+        }
+
+        PeerId peerId = peer.copy();
+        // if peer_id is ANY_PEER(0.0.0.0:0:0), the peer with the largest
+        // last_log_id will be selected.
+        if (peerId.equals(PeerId.ANY_PEER)) {
+            LOG.info("Node {} starts to transfer leadership to any peer.", getNodeId());
+            if ((peerId = this.replicatorGroup.findTheNextCandidate(this.conf)) == null) {
+                return new Status(-1, "Candidate not found for any peer");
+            }
+        }
+        if (peerId.equals(this.serverId)) {
+            LOG.info("Node {} transferred leadership to self.", this.serverId);
+            return Status.OK();
+        }
+        if (!this.conf.contains(peerId)) {
+            LOG.info("Node {} refused to transfer leadership to peer {} as it is not in {}.", getNodeId(), peer,
+                this.conf);
+            return new Status(RaftError.EINVAL, "Not in current configuration");
+        }
+
+      	//leader节点最新的日志索引
+        final long lastLogIndex = this.logManager.getLastLogIndex();
+      	//转让,设置Replicator的timeoutNowIndex等于lastLogIndex，同步进度追赶上leader时，给转让节点发送TimeoutNowRequest请求
+        if (!this.replicatorGroup.transferLeadershipTo(peerId, lastLogIndex)) {
+            LOG.warn("No such peer {}.", peer);
+            return new Status(RaftError.EINVAL, "No such peer %s", peer);
+        }
+        this.state = State.STATE_TRANSFERRING; //修改为STATE_TRANSFERRING
+        final Status status = new Status(RaftError.ETRANSFERLEADERSHIP,
+            "Raft leader is transferring leadership to %s", peerId);
+        onLeaderStop(status);
+        LOG.info("Node {} starts to transfer leadership to peer {}.", getNodeId(), peer);
+        
+        //创建转让延迟任务
+        final StopTransferArg stopArg = new StopTransferArg(this, this.currTerm, peerId);
+        this.stopTransferArg = stopArg;
+        this.transferTimer = this.timerManager.schedule(() -> onTransferTimeout(stopArg),
+            this.options.getElectionTimeoutMs(), TimeUnit.MILLISECONDS);
+
+    } finally {
+        this.writeLock.unlock();
+    }
+    return Status.OK();
+}
+```
+
+#### 转让leader给从节点
+
+com.alipay.sofa.jraft.core.ReplicatorGroupImpl#transferLeadershipTo
+
+```java
+public boolean transferLeadershipTo(final PeerId peer, final long logIndex) {
+    final ThreadId rid = this.replicatorMap.get(peer);
+    return rid != null && Replicator.transferLeadership(rid, logIndex);
+}
+```
+
+```java
+public static boolean transferLeadership(final ThreadId id, final long logIndex) {
+    final Replicator r = (Replicator) id.lock();
+    if (r == null) {
+        return false;
+    }
+    // dummy is unlock in _transfer_leadership
+    return r.transferLeadership(logIndex);
+}
+```
+
+com.alipay.sofa.jraft.core.Replicator#transferLeadership(long)
+
+```java
+private boolean transferLeadership(final long logIndex) {
+    if (this.hasSucceeded && this.nextIndex > logIndex) {
+        // _id is unlock in _send_timeout_now
+        sendTimeoutNow(true, false);
+        return true;
+    }
+    // Register log_index so that _on_rpc_return trigger
+    // _send_timeout_now if _next_index reaches log_index
+    this.timeoutNowIndex = logIndex;
+    this.id.unlock();
+    return true;
+}
+```
+
+com.alipay.sofa.jraft.core.Replicator#sendTimeoutNow(boolean, boolean, int)
+
+```java
+private void sendTimeoutNow(final boolean unlockId, final boolean stopAfterFinish, final int timeoutMs) { //当同步的索引大于发生转让时的leader的索引，执行此方法，发送TimeoutNowRequest
+    final TimeoutNowRequest.Builder rb = TimeoutNowRequest.newBuilder();
+    rb.setTerm(this.options.getTerm());
+    rb.setGroupId(this.options.getGroupId());
+    rb.setServerId(this.options.getServerId().toString());
+    rb.setPeerId(this.options.getPeerId().toString());
+    try {
+        if (!stopAfterFinish) {
+            // This RPC is issued by transfer_leadership, save this call_id so that
+            // the RPC can be cancelled by stop.
+            this.timeoutNowInFly = timeoutNow(rb, false, timeoutMs);
+            this.timeoutNowIndex = 0;
+        } else {
+            timeoutNow(rb, true, timeoutMs);
+        }
+    } finally {
+        if (unlockId) {
+            this.id.unlock();
+        }
+    }
+}
+```
+
+#### 转让超时
+
+com.alipay.sofa.jraft.core.NodeImpl#handleTransferTimeout
+
+```java
+private void handleTransferTimeout(final long term, final PeerId peer) {
+    LOG.info("Node {} failed to transfer leadership to peer {}, reached timeout.", getNodeId(), peer);
+    this.writeLock.lock();
+    try {
+        if (term == this.currTerm) {
+            this.replicatorGroup.stopTransferLeadership(peer);
+            if (this.state == State.STATE_TRANSFERRING) {
+                this.fsmCaller.onLeaderStart(term);
+                this.state = State.STATE_LEADER;
+                this.stopTransferArg = null;
+            }
+        }
+    } finally {
+        this.writeLock.unlock();
+    }
+}
+```
+
+## Follower接收转让
+
+com.alipay.sofa.jraft.core.NodeImpl#handleTimeoutNowRequest
+
+```java
+public Message handleTimeoutNowRequest(final TimeoutNowRequest request, final RpcRequestClosure done) {
+    boolean doUnlock = true;
+    this.writeLock.lock();
+    try {
+      	//1、term没有发生变更
+        if (request.getTerm() != this.currTerm) {
+            final long savedCurrTerm = this.currTerm;
+            if (request.getTerm() > this.currTerm) {
+                stepDown(request.getTerm(), false, new Status(RaftError.EHIGHERTERMREQUEST,
+                    "Raft node receives higher term request"));
+            }
+            LOG.info("Node {} received TimeoutNowRequest from {} while currTerm={} didn't match requestTerm={}.",
+                getNodeId(), request.getPeerId(), savedCurrTerm, request.getTerm());
+            return TimeoutNowResponse.newBuilder() //
+                .setTerm(this.currTerm) //
+                .setSuccess(false) //
+                .build();
+        }
+      	//2、转让的节点必须是follower类型的节点
+        if (this.state != State.STATE_FOLLOWER) {
+            LOG.info("Node {} received TimeoutNowRequest from {}, while state={}, term={}.", getNodeId(),
+                request.getServerId(), this.state, this.currTerm);
+            return TimeoutNowResponse.newBuilder() //
+                .setTerm(this.currTerm) //
+                .setSuccess(false) //
+                .build();
+        }
+				//3、返回响应
+        final long savedTerm = this.currTerm;
+        final TimeoutNowResponse resp = TimeoutNowResponse.newBuilder() //
+            .setTerm(this.currTerm + 1) //
+            .setSuccess(true) //
+            .build();
+        // Parallelize response and election
+        done.sendResponse(resp);
+        doUnlock = false;
+        //4、触发选举 
+        electSelf();
+        LOG.info("Node {} received TimeoutNowRequest from {}, term={}.", getNodeId(), request.getServerId(), savedTerm);
+    } finally {
+        if (doUnlock) {
+            this.writeLock.unlock();
+        }
+    }
+    return null;
+}
+```
+
 # 总结
 
 1、设置不同的线程池，避免了不同类型请求的相互响应
