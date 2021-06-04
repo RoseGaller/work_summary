@@ -2723,6 +2723,123 @@ private void unsafeApplyConfiguration(final Configuration newConf, final Configu
 }
 ```
 
+## 添加Learner节点
+
+com.alipay.sofa.jraft.rpc.impl.cli.AddLearnersRequestProcessor#processRequest0
+
+```java
+protected Message processRequest0(final CliRequestContext ctx, final AddLearnersRequest request, final RpcRequestClosure done) {
+    final List<PeerId> oldLearners = ctx.node.listLearners();
+    final List<PeerId> addingLearners = new ArrayList<>(request.getLearnersCount());
+
+    for (final String peerStr : request.getLearnersList()) { //learner节点可以批量添加
+        final PeerId peer = new PeerId();
+        if (!peer.parse(peerStr)) {
+            return RpcResponseFactory.newResponse(RaftError.EINVAL, "Fail to parse peer id %", peerStr);
+        }
+        addingLearners.add(peer);
+    }
+
+    LOG.info("Receive AddLearnersRequest to {} from {}, adding {}.", ctx.node.getNodeId(),
+        done.getRpcCtx().getRemoteAddress(), addingLearners);
+  	
+  	//添加learner节点
+    ctx.node.addLearners(addingLearners, status -> {
+        if (!status.isOk()) {
+            done.run(status);
+        } else {
+            final LearnersOpResponse.Builder rb = LearnersOpResponse.newBuilder();
+
+            for (final PeerId peer : oldLearners) {
+                rb.addOldLearners(peer.toString());
+                rb.addNewLearners(peer.toString());
+            }
+
+            for (final PeerId peer : addingLearners) {
+                if (!oldLearners.contains(peer)) {
+                    rb.addNewLearners(peer.toString());
+                }
+            }
+
+            done.sendResponse(rb.build());
+        }
+    });
+
+    return null;
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl#addLearners
+
+```java
+public void addLearners(final List<PeerId> learners, final Closure done) {//与添加Follower节点类似
+    checkPeers(learners);
+    this.writeLock.lock();
+    try {
+        final Configuration newConf = new Configuration(this.conf.getConf());
+        for (final PeerId peer : learners) {
+            newConf.addLearner(peer);
+        }
+        unsafeRegisterConfChange(this.conf.getConf(), newConf, done);
+    } finally {
+        this.writeLock.unlock();
+    }
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.ConfigurationCtx#start
+
+```java
+void start(final Configuration oldConf, final Configuration newConf, final Closure done) {
+    if (isBusy()) {
+        if (done != null) {
+            Utils.runClosureInThread(done, new Status(RaftError.EBUSY, "Already in busy stage."));
+        }
+        throw new IllegalStateException("Busy stage");
+    }
+    if (this.done != null) {
+        if (done != null) {
+            Utils.runClosureInThread(done, new Status(RaftError.EINVAL, "Already have done closure."));
+        }
+        throw new IllegalArgumentException("Already have done closure");
+    }
+    this.done = done;
+    this.stage = Stage.STAGE_CATCHING_UP;
+    this.oldPeers = oldConf.listPeers();
+    this.newPeers = newConf.listPeers();
+    this.oldLearners = oldConf.listLearners();
+    this.newLearners = newConf.listLearners();
+    final Configuration adding = new Configuration();
+    final Configuration removing = new Configuration();
+    newConf.diff(oldConf, adding, removing);
+    this.nchanges = adding.size() + removing.size();
+
+    addNewLearners(); //添加Learner节点,同步数据
+    if (adding.isEmpty()) { //无Follower节点添加
+        nextStage(); //直接同步变更的节点配置信息
+        return;
+    }
+    addNewPeers(adding);
+}
+```
+
+com.alipay.sofa.jraft.core.NodeImpl.ConfigurationCtx#addNewLearners
+
+```java
+private void addNewLearners() {
+    final Set<PeerId> addingLearners = new HashSet<>(this.newLearners);
+    addingLearners.removeAll(this.oldLearners);
+    LOG.info("Adding learners: {}.", this.addingPeers);
+    for (final PeerId newLearner : addingLearners) {
+        //创建Replicator,同步数据
+        if (!this.node.replicatorGroup.addReplicator(newLearner, ReplicatorType.Learner)) {
+            LOG.error("Node {} start the learner replicator failed, peer={}.", this.node.getNodeId(),
+                newLearner);
+        }
+    }
+}
+```
+
 # Leader转让
 
 ### Leader节点处理转让
@@ -2881,7 +2998,7 @@ private void handleTransferTimeout(final long term, final PeerId peer) {
 }
 ```
 
-## Follower接收转让
+## Follower接收转让请求
 
 com.alipay.sofa.jraft.core.NodeImpl#handleTimeoutNowRequest
 
