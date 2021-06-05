@@ -2491,6 +2491,622 @@ static <T> Queue<T> newMpscQueue(final int maxCapacity) {
 }
 ```
 
+# HTTP2
+
+## 协议升级
+
+### 客户端
+
+io.netty.handler.codec.http.HttpClientUpgradeHandler#write
+
+```java
+public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
+        throws Exception { //首次写，请求头添加与http2相关的信息，比如upgrade
+    if (!(msg instanceof HttpRequest)) {
+        ctx.write(msg, promise);
+        return;
+    }
+
+    if (upgradeRequested) {
+        promise.setFailure(new IllegalStateException(
+                "Attempting to write HTTP request with upgrade in progress"));
+        return;
+    }
+		//默认false，第一次发送数据时，将器设置为true
+    upgradeRequested = true; 
+  	//设置升级协议所必须的请求头
+    setUpgradeRequestHeaders(ctx, (HttpRequest) msg);
+
+    // Continue writing the request.
+    ctx.write(msg, promise);
+
+    // Notify that the upgrade request was issued.
+    ctx.fireUserEventTriggered(UpgradeEvent.UPGRADE_ISSUED);
+    // Now we wait for the next HTTP response to see if we switch protocols.
+}
+```
+
+io.netty.handler.codec.http.HttpClientUpgradeHandler#setUpgradeRequestHeaders
+
+```java
+private void setUpgradeRequestHeaders(ChannelHandlerContext ctx, HttpRequest request) {//设置升级请求头
+    // 设置upgrade
+    request.headers().set(HttpHeaderNames.UPGRADE, upgradeCodec.protocol());
+
+    // Add all protocol-specific headers to the request.
+    Set<CharSequence> connectionParts = new LinkedHashSet<CharSequence>(2);
+    connectionParts.addAll(upgradeCodec.setUpgradeHeaders(ctx, request));
+
+    // Set the CONNECTION header from the set of all protocol-specific headers that were added.
+    StringBuilder builder = new StringBuilder();
+    for (CharSequence part : connectionParts) {
+        builder.append(part);
+        builder.append(',');
+    }
+    builder.append(HttpHeaderValues.UPGRADE);
+  	//设置CONNECTION
+    request.headers().add(HttpHeaderNames.CONNECTION, builder.toString());
+}
+```
+
+接收server返回的升级响应
+
+io.netty.handler.codec.http.HttpClientUpgradeHandler#decode
+
+```java
+protected void decode(ChannelHandlerContext ctx, HttpObject msg, List<Object> out)
+        throws Exception {
+    FullHttpResponse response = null;
+    try {
+        if (!upgradeRequested) {
+            throw new IllegalStateException("Read HTTP response without requesting protocol switch");
+        }
+
+        if (msg instanceof HttpResponse) {
+            HttpResponse rep = (HttpResponse) msg;
+            if (!SWITCHING_PROTOCOLS.equals(rep.status())) {
+                // The server does not support the requested protocol, just remove this handler
+                // and continue processing HTTP.
+                // NOTE: not releasing the response since we're letting it propagate to the
+                // next handler.
+                ctx.fireUserEventTriggered(UpgradeEvent.UPGRADE_REJECTED);
+                removeThisHandler(ctx);
+                ctx.fireChannelRead(msg);
+                return;
+            }
+        }
+
+        if (msg instanceof FullHttpResponse) {
+            response = (FullHttpResponse) msg;
+            // Need to retain since the base class will release after returning from this method.
+            response.retain();
+            out.add(response);
+        } else {
+            // Call the base class to handle the aggregation of the full request.
+            super.decode(ctx, msg, out);
+            if (out.isEmpty()) {
+                // The full request hasn't been created yet, still awaiting more data.
+                return;
+            }
+
+            assert out.size() == 1;
+            response = (FullHttpResponse) out.get(0);
+        }
+			  //响应信息的头部必须要有UPGRADE
+        CharSequence upgradeHeader = response.headers().get(HttpHeaderNames.UPGRADE);
+        if (upgradeHeader != null && !AsciiString.contentEqualsIgnoreCase(upgradeCodec.protocol(), upgradeHeader)) {
+            throw new IllegalStateException(
+                    "Switching Protocols response with unexpected UPGRADE protocol: " + upgradeHeader);
+        }
+
+        // Upgrade to the new protocol.
+        sourceCodec.prepareUpgradeFrom(ctx); //准备从http升级到http2
+        upgradeCodec.upgradeTo(ctx, response); //添加http2相关的handler
+
+        // Notify that the upgrade to the new protocol completed successfully.
+        ctx.fireUserEventTriggered(UpgradeEvent.UPGRADE_SUCCESSFUL);
+
+        // We guarantee UPGRADE_SUCCESSFUL event will be arrived at the next handler
+        // before http2 setting frame and http response.
+        sourceCodec.upgradeFrom(ctx);
+
+        // We switched protocols, so we're done with the upgrade response.
+        // Release it and clear it from the output.
+        response.release();
+        out.clear();
+        removeThisHandler(ctx);
+    } catch (Throwable t) {
+        release(response);
+        ctx.fireExceptionCaught(t);
+        removeThisHandler(ctx);
+    }
+}
+```
+
+io.netty.handler.codec.http2.Http2ClientUpgradeCodec#upgradeTo
+
+```java
+public void upgradeTo(ChannelHandlerContext ctx, FullHttpResponse upgradeResponse)
+    throws Exception {
+    try {
+      
+        //添加handler，触发handlerAdd方法,发送connection preface（连接前言）
+        ctx.pipeline().addAfter(ctx.name(), handlerName, upgradeToHandler);
+
+        if (http2MultiplexHandler != null) {
+            final String name = ctx.pipeline().context(connectionHandler).name();
+            ctx.pipeline().addAfter(name, null, http2MultiplexHandler);
+        }
+
+        // Reserve local stream 1 for the response.
+        connectionHandler.onHttpClientUpgrade();
+    } catch (Http2Exception e) {
+        ctx.fireExceptionCaught(e);
+        ctx.close();
+    }
+}
+```
+
+io.netty.handler.codec.http2.Http2ConnectionHandler.PrefaceDecoder#sendPreface
+
+```java
+private void sendPreface(ChannelHandlerContext ctx) throws Exception {
+    if (prefaceSent || !ctx.channel().isActive()) {
+        return;
+    }
+
+    prefaceSent = true;
+		//必须是客户端
+    final boolean isClient = !connection().isServer();
+    if (isClient) { //发送连接前言
+        // Clients must send the preface string as the first bytes on the connection.
+      ctx.write(connectionPrefaceBuf()).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+    }
+
+    // Both client and server must send their initial settings.
+    encoder.writeSettings(ctx, initialSettings, ctx.newPromise()).addListener(
+            ChannelFutureListener.CLOSE_ON_FAILURE);
+
+    if (isClient) {
+        userEventTriggered(ctx,Http2ConnectionPrefaceAndSettingsFrameWrittenEvent.INSTANCE);
+    }
+}
+```
+
+io.netty.handler.codec.http2.Http2ConnectionHandler#onHttpClientUpgrade
+
+```java
+public void onHttpClientUpgrade() throws Http2Exception {
+    if (connection().isServer()) {
+        throw connectionError(PROTOCOL_ERROR, "Client-side HTTP upgrade requested for a server");
+    }
+    if (!prefaceSent()) {
+        // If the preface was not sent yet it most likely means the handler was not added to the pipeline before
+        // calling this method.
+        throw connectionError(INTERNAL_ERROR, "HTTP upgrade must occur after preface was sent");
+    }
+    if (decoder.prefaceReceived()) {
+        throw connectionError(PROTOCOL_ERROR, "HTTP upgrade must occur before HTTP/2 preface is received");
+    }
+
+    // Create a local stream used for the HTTP cleartext upgrade.
+    connection().local().createStream(HTTP_UPGRADE_STREAM_ID, true);
+}
+```
+
+### 服务端
+
+io.netty.handler.codec.http.HttpServerUpgradeHandler#decode
+
+```java
+protected void decode(ChannelHandlerContext ctx, HttpObject msg, List<Object> out)
+        throws Exception {
+    // Determine if we're already handling an upgrade request or just starting a new one.
+    handlingUpgrade |= isUpgradeRequest(msg); //协议升级请求，请求头包含UPGRADE
+    if (!handlingUpgrade) {
+        // Not handling an upgrade request, just pass it to the next handler.
+        ReferenceCountUtil.retain(msg);
+        out.add(msg);
+        return;
+    }
+
+    FullHttpRequest fullRequest;
+    if (msg instanceof FullHttpRequest) {
+        fullRequest = (FullHttpRequest) msg;
+        ReferenceCountUtil.retain(msg);
+        out.add(msg);
+    } else {
+        // Call the base class to handle the aggregation of the full request.
+        super.decode(ctx, msg, out);
+        if (out.isEmpty()) {
+            // The full request hasn't been created yet, still awaiting more data.
+            return;
+        }
+
+        // Finished aggregating the full request, get it from the output list.
+        assert out.size() == 1;
+        handlingUpgrade = false;
+        fullRequest = (FullHttpRequest) out.get(0);
+    }
+
+    if (upgrade(ctx, fullRequest)) { //升级
+        // The upgrade was successful, remove the message from the output list
+        // so that it's not propagated to the next handler. This request will
+        // be propagated as a user event instead.
+        out.clear(); //清空
+    }
+
+    // The upgrade did not succeed, just allow the full request to propagate to the
+    // next handler.
+}
+
+/**
+```
+
+io.netty.handler.codec.http.HttpServerUpgradeHandler#upgrade
+
+```java
+private boolean upgrade(final ChannelHandlerContext ctx, final FullHttpRequest request) {
+    // Select the best protocol based on those requested in the UPGRADE header.
+    final List<CharSequence> requestedProtocols = splitHeader(request.headers().get(HttpHeaderNames.UPGRADE));
+    final int numRequestedProtocols = requestedProtocols.size();
+    UpgradeCodec upgradeCodec = null;
+    CharSequence upgradeProtocol = null;
+    for (int i = 0; i < numRequestedProtocols; i ++) {
+        final CharSequence p = requestedProtocols.get(i);
+        final UpgradeCodec c = upgradeCodecFactory.newUpgradeCodec(p);
+        if (c != null) {
+            upgradeProtocol = p; //升级协议(明文的h2c，密文的h2)
+            upgradeCodec = c;
+            break;
+        }
+    }
+
+    if (upgradeCodec == null) { // 没有获取到客户端指定的升级协议
+        return false;
+    }
+
+    // Make sure the CONNECTION header is present.
+    List<String> connectionHeaderValues = request.headers().getAll(HttpHeaderNames.CONNECTION);
+    if (connectionHeaderValues == null) {
+        return false;
+    }
+    final StringBuilder concatenatedConnectionValue = new StringBuilder(connectionHeaderValues.size() * 10);
+    for (CharSequence connectionHeaderValue : connectionHeaderValues) {
+        concatenatedConnectionValue.append(connectionHeaderValue).append(COMMA);
+    }
+    concatenatedConnectionValue.setLength(concatenatedConnectionValue.length() - 1);
+  
+    // CONNECTION header包含UPGRADE和必要的header
+    Collection<CharSequence> requiredHeaders = upgradeCodec.requiredUpgradeHeaders();
+    List<CharSequence> values = splitHeader(concatenatedConnectionValue);
+    if (!containsContentEqualsIgnoreCase(values, HttpHeaderNames.UPGRADE) ||
+            !containsAllContentEqualsIgnoreCase(values, requiredHeaders)) {
+        return false;
+    }
+  
+    //请求头必须包含必要的header
+    for (CharSequence requiredHeader : requiredHeaders) {
+        if (!request.headers().contains(requiredHeader)) {
+            return false;
+        }
+    }
+   
+		//创建协议升级的响应
+    final FullHttpResponse upgradeResponse = createUpgradeResponse(upgradeProtocol); 
+  
+    //请求头必须有HTTP2-Settings
+    if (!upgradeCodec.prepareUpgradeResponse(ctx, request, upgradeResponse.headers())) { 
+        return false;
+    }
+
+     //创建协议升级事件
+    final UpgradeEvent event = new UpgradeEvent(upgradeProtocol, request); 
+
+    // After writing the upgrade response we immediately prepare the
+    // pipeline for the next protocol to avoid a race between completion
+    // of the write future and receiving data before the pipeline is
+    // restructured.
+    try {
+      	//返回协议升级的响应
+        final ChannelFuture writeComplete = ctx.writeAndFlush(upgradeResponse);
+      
+        sourceCodec.upgradeFrom(ctx); //移除handler
+        upgradeCodec.upgradeTo(ctx, request); //添加HTTP2相关的handler
+
+        //从Pipeline中移除HttpServerUpgradeHandler
+        ctx.pipeline().remove(HttpServerUpgradeHandler.this); 
+
+        //增加请求的引用计数，传递UpgradeEvent协议升级事件
+        ctx.fireUserEventTriggered(event.retain()); 
+      
+				//为升级响应注册监听器
+        writeComplete.addListener(ChannelFutureListener.CLOSE_ON_FAILURE); 
+    } finally {
+        // Release the event if the upgrade event wasn't fired.
+        event.release(); 
+    }
+    return true;
+}
+```
+
+io.netty.handler.codec.http2.Http2ServerUpgradeCodec#upgradeTo
+
+```java
+public void upgradeTo(final ChannelHandlerContext ctx, FullHttpRequest upgradeRequest) {
+    try {
+       
+      	//添加HTTP/2 connection handler,触发handlerAdded
+        ctx.pipeline().addAfter(ctx.name(), handlerName, connectionHandler);
+
+        // Add also all extra handlers as these may handle events / messages produced by the connectionHandler.
+        // See https://github.com/netty/netty/issues/9314
+        if (handlers != null) {
+            final String name = ctx.pipeline().context(connectionHandler).name();
+            for (int i = handlers.length - 1; i >= 0; i--) {
+                ctx.pipeline().addAfter(name, null, handlers[i]);
+            }
+        }
+        connectionHandler.onHttpServerUpgrade(settings);
+    } catch (Http2Exception e) {
+        ctx.fireExceptionCaught(e);
+        ctx.close();
+    }
+}
+```
+
+io.netty.handler.codec.http2.Http2ConnectionHandler#handlerAdded
+
+```java
+public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+    // Initialize the encoder, decoder, flow controllers, and internal state.
+    encoder.lifecycleManager(this);
+    decoder.lifecycleManager(this);
+    encoder.flowController().channelHandlerContext(ctx);
+    decoder.flowController().channelHandlerContext(ctx);
+    byteDecoder = new PrefaceDecoder(ctx); //创建连接前言解码器
+}
+```
+
+io.netty.handler.codec.http2.Http2ConnectionHandler.PrefaceDecoder#PrefaceDecoder
+
+```java
+PrefaceDecoder(ChannelHandlerContext ctx) throws Exception {
+    clientPrefaceString = clientPrefaceString(encoder.connection());
+    // This handler was just added to the context. In case it was handled after
+    // the connection became active, send the connection preface now.
+    sendPreface(ctx); //发送连接前言
+}
+```
+
+io.netty.handler.codec.http2.Http2ConnectionHandler.PrefaceDecoder#sendPreface
+
+```java
+private void sendPreface(ChannelHandlerContext ctx) throws Exception {
+    if (prefaceSent || !ctx.channel().isActive()) { //尚未发送连接前言
+        return;
+    }
+   
+		//标志连接前言已经发送
+    prefaceSent = true;
+	
+  	//只有client端才会发送连接前言
+    final boolean isClient = !connection().isServer();
+    if (isClient) {
+      ctx.write(connectionPrefaceBuf()).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+    }
+  
+		//客户端和服务端都会发送初始settings
+    encoder.writeSettings(ctx, initialSettings, ctx.newPromise()).addListener(
+            ChannelFutureListener.CLOSE_ON_FAILURE);
+
+    if (isClient) {
+        userEventTriggered(ctx,Http2ConnectionPrefaceAndSettingsFrameWrittenEvent.INSTANCE);
+    }
+}
+```
+
+## 解码
+
+io.netty.handler.codec.http2.Http2ConnectionHandler.PrefaceDecoder#decode
+
+```java
+public void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+    try {
+        if (ctx.channel().isActive() && readClientPrefaceString(in) && verifyFirstFrameIsSettings(in)) {
+            // After the preface is read, it is time to hand over control to the post initialized decoder.
+            byteDecoder = new FrameDecoder();
+            byteDecoder.decode(ctx, in, out);
+        }
+    } catch (Throwable e) {
+        onError(ctx, false, e);
+    }
+}
+```
+
+io.netty.handler.codec.http2.Http2ConnectionHandler.FrameDecoder#decode
+
+```java
+public void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+    try {
+        decoder.decodeFrame(ctx, in, out);
+    } catch (Throwable e) {
+        onError(ctx, false, e);
+    }
+}
+```
+
+io.netty.handler.codec.http2.DefaultHttp2ConnectionDecoder#decodeFrame
+
+```java
+public void decodeFrame(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Http2Exception {
+    frameReader.readFrame(ctx, in, internalFrameListener);
+}
+```
+
+io.netty.handler.codec.http2.DefaultHttp2FrameReader#readFrame
+
+```java
+public void readFrame(ChannelHandlerContext ctx, ByteBuf input, Http2FrameListener listener)
+        throws Http2Exception { //读取数据
+    if (readError) {
+        input.skipBytes(input.readableBytes());
+        return;
+    }
+    try {
+        do {
+            if (readingHeaders) {
+                processHeaderState(input);
+                if (readingHeaders) { //frame header尚未读取完整
+                    // Wait until the entire header has arrived.
+                    return;
+                }
+            }
+
+            // The header is complete, fall into the next case to process the payload.
+            // This is to ensure the proper handling of zero-length payloads. In this
+            // case, we don't want to loop around because there may be no more data
+            // available, causing us to exit the loop. Instead, we just want to perform
+            // the first pass at payload processing now.
+            processPayloadState(ctx, input, listener); //读取frame payload
+            if (!readingHeaders) {
+                // Wait until the entire payload has arrived.
+                return;
+            }
+        } while (input.isReadable());
+    } catch (Http2Exception e) {
+        readError = !Http2Exception.isStreamError(e);
+        throw e;
+    } catch (RuntimeException e) {
+        readError = true;
+        throw e;
+    } catch (Throwable cause) {
+        readError = true;
+        PlatformDependent.throwException(cause);
+    }
+}
+```
+
+读取FrameHeader
+
+io.netty.handler.codec.http2.DefaultHttp2FrameReader#processHeaderState
+
+```java
+private void processHeaderState(ByteBuf in) throws Http2Exception { 
+    if (in.readableBytes() < FRAME_HEADER_LENGTH) { // Http2报文头9个字节
+        // Wait until the entire frame header has been read.
+        return;
+    }
+
+    // Read the header and prepare the unmarshaller to read the frame.
+    payloadLength = in.readUnsignedMedium(); //3个字节的数据长度
+    if (payloadLength > maxFrameSize) {
+        throw connectionError(FRAME_SIZE_ERROR, "Frame length: %d exceeds maximum: %d", payloadLength,
+                              maxFrameSize);
+    }
+    frameType = in.readByte(); //帧类型
+    flags = new Http2Flags(in.readUnsignedByte()); //标志位（END_HEADERS:表示头数据结束,END_STREAM:表示单方向数据发送结束）
+    streamId = readUnsignedInt(in); //流标志符
+
+    // We have consumed the data, next time we read we will be expecting to read the frame payload.
+    readingHeaders = false; //frame header已经成功读取9字节
+
+    switch (frameType) { //验证合法性
+        case DATA:
+            verifyDataFrame();
+            break;
+        case HEADERS:
+            verifyHeadersFrame();
+            break;
+        case PRIORITY:
+            verifyPriorityFrame();
+            break;
+        case RST_STREAM:
+            verifyRstStreamFrame();
+            break;
+        case SETTINGS:
+            verifySettingsFrame();
+            break;
+        case PUSH_PROMISE:
+            verifyPushPromiseFrame();
+            break;
+        case PING:
+            verifyPingFrame();
+            break;
+        case GO_AWAY:
+            verifyGoAwayFrame();
+            break;
+        case WINDOW_UPDATE:
+            verifyWindowUpdateFrame();
+            break;
+        case CONTINUATION:
+            verifyContinuationFrame();
+            break;
+        default:
+            // Unknown frame type, could be an extension.
+            verifyUnknownFrame();
+            break;
+    }
+}
+```
+
+读取FramePayload
+
+io.netty.handler.codec.http2.DefaultHttp2FrameReader#processPayloadState
+
+```java
+private void processPayloadState(ChannelHandlerContext ctx, ByteBuf in, Http2FrameListener listener)
+                throws Http2Exception {
+    if (in.readableBytes() < payloadLength) { //payload不完整
+        return;
+    }
+
+  	//可以读取完整数据
+    // Only process up to payloadLength bytes.
+    int payloadEndIndex = in.readerIndex() + payloadLength;
+
+    readingHeaders = true; //下次开始读取FrameHeader
+
+    // Read the payload and fire the frame event to the listener.
+    switch (frameType) {
+        case DATA:
+            readDataFrame(ctx, in, payloadEndIndex, listener);
+            break;
+        case HEADERS:
+            readHeadersFrame(ctx, in, payloadEndIndex, listener);
+            break;
+        case PRIORITY:
+            readPriorityFrame(ctx, in, listener);
+            break;
+        case RST_STREAM:
+            readRstStreamFrame(ctx, in, listener);
+            break;
+        case SETTINGS:
+            readSettingsFrame(ctx, in, listener);
+            break;
+        case PUSH_PROMISE:
+            readPushPromiseFrame(ctx, in, payloadEndIndex, listener);
+            break;
+        case PING:
+            readPingFrame(ctx, in.readLong(), listener);
+            break;
+        case GO_AWAY:
+            readGoAwayFrame(ctx, in, payloadEndIndex, listener);
+            break;
+        case WINDOW_UPDATE:
+            readWindowUpdateFrame(ctx, in, listener);
+            break;
+        case CONTINUATION:
+            readContinuationFrame(in, payloadEndIndex, listener);
+            break;
+        default:
+            readUnknownFrame(ctx, in, payloadEndIndex, listener);
+            break;
+    }
+    in.readerIndex(payloadEndIndex);
+}
+```
+
 # 总结
 
 1、SelectorImpl优化，将Set实现的集合替换为数组
