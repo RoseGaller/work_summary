@@ -1,5 +1,6 @@
 # Jraft源码分析
 
+* [Jraft源码分析](#jraft源码分析)
 * [Leader选举](#leader选举)
   * [预投票](#预投票)
     * [选举超时定时器](#选举超时定时器)
@@ -51,6 +52,14 @@
           * [心跳回调](#心跳回调)
       * [线性读回调](#线性读回调)
       * [唤醒阻塞ReadIndex请求](#唤醒阻塞readindex请求)
+* [扩容](#扩容)
+  * [添加follower节点](#添加follower节点)
+  * [添加Learner节点](#添加learner节点)
+* [Leader转让](#leader转让)
+    * [Leader节点处理转让](#leader节点处理转让)
+      * [转让leader给从节点](#转让leader给从节点)
+      * [转让超时](#转让超时)
+  * [Follower接收转让请求](#follower接收转让请求)
 * [总结](#总结)
 
 
