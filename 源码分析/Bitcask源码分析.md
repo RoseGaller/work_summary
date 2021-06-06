@@ -1,10 +1,8 @@
-## Bitcask源码分析
+# 概述
 
 Bitcask存储模型，写时顺序写，然后建立索引信息。索引放在内存中，通过Adaptive Radix Tree进行存储。
 
-适用于根据key随机查询
-
-### 写数据
+# 写数据
 
 bitcask.go
 
@@ -54,10 +52,10 @@ func (b *Bitcask) Put(key, value []byte, options ...PutOptions) error {
 }
 ```
 
-bitcask.go:写文件，返回offset
+bitcask.go:
 
 ```go
-func (b *Bitcask) put(key, value []byte, feature Feature) (int64, int64, error) {
+func (b *Bitcask) put(key, value []byte, feature Feature) (int64, int64, error) {//写文件，返回offset
    size := b.curr.Size()
    //当前文件剩余空间不足
    if size >= int64(b.config.MaxDatafileSize) {
@@ -93,7 +91,7 @@ func (b *Bitcask) put(key, value []byte, feature Feature) (int64, int64, error) 
 }
 ```
 
-### 读数据
+# 读数据
 
 bitcask.go
 
@@ -132,7 +130,7 @@ func (b *Bitcask) get(key []byte) (internal.Entry, error) {
 }
 ```
 
-### 删除数据
+# 删除数据
 
 bitcask.go
 
