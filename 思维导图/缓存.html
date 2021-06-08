@@ -1,0 +1,1299 @@
+<html>
+<head>
+<META http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+<meta content="text/css" http-equiv="Content-Style-Type">
+<title>缓存</title>
+</head>
+<body>
+<h1 align="center" class="root">
+<a name="6lpfdv8q2tf9sokrmqrrj3ddro">缓存</a>
+</h1>
+<div align="center" class="globalOverview">
+<img src="%E7%BC%93%E5%AD%98_files/images/%E7%BC%93%E5%AD%98 2.jpg"></div>
+<h2 class="topic">
+<a name="57dd7nmsah9pmv1a2re97fmtcu">Redis</a>
+</h2>
+<h3 class="topic">
+<a name="6e7gofa219ko9l3d88luk9q45e">&nbsp;数据结构</a>
+</h3>
+<h3 class="topic">
+<a name="6rvp0ql123lhbhmgbobn03pehk">&nbsp;&nbsp;String</a>
+</h3>
+<h3 class="topic">
+<a name="1kfqi8qa8ko1lamtlnma8m111l">&nbsp;&nbsp;&nbsp;简单动态字符串</a>
+</h3>
+<h3 class="topic">
+<a name="505ti9m73u7e3pf29b9lk38a6q">&nbsp;&nbsp;Hash</a>
+</h3>
+<h3 class="topic">
+<a name="0ukoe0lu6bt570kh9j95bt497s">&nbsp;&nbsp;&nbsp;字典</a>
+</h3>
+<h3 class="topic">
+<a name="4ajvtf32fbjs81ba4hrv7osgp7">&nbsp;&nbsp;&nbsp;压缩列表</a>
+</h3>
+<h3 class="topic">
+<a name="4jr3amjls5i2ovvakurg906ant">&nbsp;&nbsp;List</a>
+</h3>
+<h3 class="topic">
+<a name="78ekranaet6sla7nd47i2c4fbd">&nbsp;&nbsp;&nbsp;快速列表</a>
+</h3>
+<h3 class="topic">
+<a name="4mkbpekfmbur5jjvg67o143j2c">&nbsp;&nbsp;&nbsp;压缩列表</a>
+</h3>
+<h3 class="topic">
+<a name="2d5goltm022j7dtaj9f7o8gsoa">&nbsp;&nbsp;Set</a>
+</h3>
+<h3 class="topic">
+<a name="04k1ombchd9597jsn83udscgbh">&nbsp;&nbsp;&nbsp;整数集合</a>
+</h3>
+<h3 class="topic">
+<a name="45hbo46c7q31vdfshr3u6fa8od">&nbsp;&nbsp;&nbsp;字典</a>
+</h3>
+<h3 class="topic">
+<a name="1fnnof6lrrf471fdfhl4gou0dv">&nbsp;&nbsp;Sorted Set</a>
+</h3>
+<h3 class="topic">
+<a name="7njb6lqvkbg2pkfr3k6pc0tj55">&nbsp;&nbsp;&nbsp;跳表</a>
+</h3>
+<h3 class="topic">
+<a name="5fm5re6h96cv14uuhqqbn5poke">&nbsp;&nbsp;&nbsp;压缩列表</a>
+</h3>
+<h3 class="topic">
+<a name="4b4cqnbhnd2ck0rnqonqk7r5at">&nbsp;&nbsp;全局哈希表</a>
+</h3>
+<div class="notesContainer">
+<p>为了实现从键到值的快速访问，Redis 使用了一个哈希表来保存所有键值对。</p>
+<p>哈希桶中的 entry 元素中保存了*key和*value指针，分别指向了实际的键和值，这样一来，即使值是一个集合，也可以通过*value指针被查找到</p>
+<p>edis 会对哈希表做 rehash 操作。rehash 也就是增加现有的哈希桶数量</p>
+<p>1.给哈希表 2 分配更大的空间，例如是当前哈希表 1 大小的两倍；</p>
+<p>2/把哈希表 1 中的数据重新映射并拷贝到哈希表 2 中；</p>
+<p>3/释放哈希表 1 的空间</p>
+<p>第二步涉及大量的数据拷贝，如果一次性把哈希表 1 中的数据都迁移完，会造成 Redis 线程阻塞，无法服务其他请求。此时，Redis 就无法快速访问数据了。为了避免这个问题，Redis 采用了渐进式 rehash</p>
+</div>
+<h3 class="topic">
+<a name="5ug4cs6u2ailmo3abarosnk293">&nbsp;&nbsp;&nbsp;渐进式rehash</a>
+</h3>
+<h3 class="topic">
+<a name="27jparqiulkl5u3tk9t0h20kgb">&nbsp;&nbsp;&nbsp;&nbsp;描述</a>
+</h3>
+<h3 class="topic">
+<a name="7nltp1d25cnlgbmqbrd78818d4">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rehash操作不是一次性完成，而是多次、渐进式的完成）</a>
+</h3>
+<h3 class="topic">
+<a name="6lnathso5u2qdb4sdlbhqqr4o8">&nbsp;&nbsp;&nbsp;&nbsp;原因</a>
+</h3>
+<h3 class="topic">
+<a name="4ocm37v3knitn346rujjh2tuv3">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rehash操作需要一次性将全部的键值对移到新的哈希表的话，可能导致服务器在一段时间内停止工作；渐进式rehah避免了对服务器性能的影响。</a>
+</h3>
+<h3 class="topic">
+<a name="3chh3m5j7o451thqcmi0btksi8">&nbsp;&nbsp;&nbsp;&nbsp;实现</a>
+</h3>
+<h3 class="topic">
+<a name="7lncbg326f63ch0tf1i8edknoa">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;将rehash的操作均摊到对字典的每个添加、删除、查找和更新操作。在rehash操作期间，会同时使用新旧的两个哈希表，删除、更新、读取会在两个哈希表执行；添加操作只会在新的哈希表执行</a>
+</h3>
+<h3 class="topic">
+<a name="72199bshb0jdlvp8qq7vp6ti5b">&nbsp;&nbsp;&nbsp;保存所有键值对</a>
+</h3>
+<h3 class="topic">
+<a name="77ce48ed2f6gp3pppm9ilio8vv">&nbsp;持久化，避免数据丢失</a>
+</h3>
+<h3 class="topic">
+<a name="347j58g27hriksil2c59u9mh0j">&nbsp;&nbsp;RDB</a>
+</h3>
+<h3 class="topic">
+<a name="1e9vdhjcg3e97fpk2qklnul68c">&nbsp;&nbsp;&nbsp;默认的持久化方式；&nbsp;RDB文件是经过压缩的二进制文件，占用的空间会小于内存中的数据，更加利于传输，进行备份（安全退出的模式redis-cli SHUTDOWN，redis在退出时，会将内存中的数据生成一次RDB快照）</a>
+</h3>
+<h3 class="topic">
+<a name="1fog5dgpil1uovgkc2fck2ut46">&nbsp;&nbsp;&nbsp;生成命令</a>
+</h3>
+<h3 class="topic">
+<a name="7un94sca8aebu0ljge35defvgh">&nbsp;&nbsp;&nbsp;&nbsp;save:在主线程中执行，会导致阻塞</a>
+</h3>
+<h3 class="topic">
+<a name="2261ligiknv3r8mq2fusrb50eg">&nbsp;&nbsp;&nbsp;&nbsp;bgsave：创建子进程，用于写入 RDB 文件，避免了主线程的阻塞（默认）</a>
+</h3>
+<h3 class="topic">
+<a name="4oaa3p16kvqqevqp25a5eptuge">&nbsp;&nbsp;&nbsp;丢失最后一次快照以后更改的所有数据</a>
+</h3>
+<h3 class="topic">
+<a name="160mnilv9ftdo5cljbafo5uv62">&nbsp;&nbsp;&nbsp;原理：1.redis使用fork函数复制一份当前进程的副本(子进程)&#13;
+2.父进程继续接收并处理客户端发来的命令，而子进程开始将内存中的数据写入硬盘中的临时文件。&#13;
+当子进程写入完所有数据后会用该临时文件替换旧的RDB文件，至此，一次快照操作完成</a>
+</h3>
+<h3 class="topic">
+<a name="56frg2ha5cpaa7aso2nd0100tp">&nbsp;&nbsp;&nbsp;避免频繁的执行快照；频繁将全量数据写入磁盘，会给磁盘带来很大压力；fork 这个创建过程本身会阻塞主线程，而且主线程的内存越大，阻塞时间越长</a>
+</h3>
+<h3 class="topic">
+<a name="5rg9ug34r7u6tlpiq1gato4uvh">&nbsp;&nbsp;&nbsp;增量快照:在做完一次全量快照之后，只需要将被修改的数据写入快照文件就行。Redis 4.0 中提出了一个混合使用 AOF 日志和内存快照的方法。简单来说，内存快照以一定的频率执行，在两次快照之间，使用 AOF 日志记录这期间的所有命令操作</a>
+</h3>
+<h3 class="topic">
+<a name="3gf5svl55pt8rhsnfm8b1s14jc">&nbsp;&nbsp;&nbsp;写时复制</a>
+</h3>
+<h3 class="topic">
+<a name="4bh12lg8ea6labdjkreisorrtq">&nbsp;&nbsp;&nbsp;&nbsp;在执行RDB快照的时候，主线程对修改的数据复制一份，生成一个副本，bgsave 子进程会把这个副本数据写入 RDB 文件，</a>
+</h3>
+<h3 class="topic">
+<a name="6voq39cifllfpjq48snerpi3qd">&nbsp;&nbsp;AOF</a>
+</h3>
+<h3 class="topic">
+<a name="579sqs5nvqroum91ab0614f99r">&nbsp;&nbsp;&nbsp;最安全、容灾、易读、可修改；缺点：体积大，性能消耗高，数据恢复慢</a>
+</h3>
+<h3 class="topic">
+<a name="6onq8lav9lmi2lrfgo9k1bjc9e">&nbsp;&nbsp;&nbsp;实现:1、执行命令 2、写入内存 3、记录日志（内容就是redis收到的命令）</a>
+</h3>
+<h3 class="topic">
+<a name="2arpqjk8j7l6v5825pfergo96d">&nbsp;&nbsp;&nbsp;开启AOF持久化</a>
+</h3>
+<h3 class="topic">
+<a name="3369nqg3sbajs31f4u7b9oeor3">&nbsp;&nbsp;&nbsp;&nbsp;appendonly yes</a>
+</h3>
+<h3 class="topic">
+<a name="7l4e2791u593vlrm78h83ulek3">&nbsp;&nbsp;&nbsp;刷盘策略</a>
+</h3>
+<h3 class="topic">
+<a name="5gr776sgtmujjm94qt197makku">&nbsp;&nbsp;&nbsp;&nbsp;同步写回，每个写命令执行完，立马同步地将日志写回磁盘：appendfsync always</a>
+</h3>
+<h3 class="topic">
+<a name="3ijshag11c006hohpvvn1efl5p">&nbsp;&nbsp;&nbsp;&nbsp;每个写命令执行完，只是先把日志写到 AOF 文件的内存缓冲区，每隔一秒把缓冲区中的内容写入磁盘：appendfsync everysec</a>
+</h3>
+<h3 class="topic">
+<a name="4poffjisqak21avuf6mf42oia9">&nbsp;&nbsp;&nbsp;&nbsp;操作系统控制的写回，每个写命令执行完，只是先把日志写到 AOF 文件的内存缓冲区，由操作系统决定何时将缓冲区内容写回磁盘：appendfsync no</a>
+</h3>
+<h3 class="topic">
+<a name="7h7239aj866pmp19pa5as9qhcl">&nbsp;&nbsp;&nbsp;AOF重写</a>
+</h3>
+<h3 class="topic">
+<a name="3nov21b45n95j0l2u4vnbfncv2">&nbsp;&nbsp;&nbsp;&nbsp;AOF文件不能过大，操作系统会文件的大小有限制；实例宕机，恢复比较慢；文件太大，追加命令记录的效率会降低</a>
+</h3>
+<h3 class="topic">
+<a name="2n58km8as54gsut8sf2e0ii1nk">&nbsp;&nbsp;&nbsp;&nbsp;将重复的命令在重写后变成一条命令</a>
+</h3>
+<h3 class="topic">
+<a name="0f45rc83q20eu0ecta3clrgc8d">&nbsp;&nbsp;建议</a>
+</h3>
+<h3 class="topic">
+<a name="2l1lo1bm30hmevp011sncse0m4">&nbsp;&nbsp;&nbsp;数据不能丢失时，内存快照和 AOF 的混合使用是一个很好的选择；</a>
+</h3>
+<h3 class="topic">
+<a name="2acnm6tv8lps0gcs6lh6psq9cu">&nbsp;&nbsp;&nbsp;如果允许分钟级别的数据丢失，可以只使用 RDB；</a>
+</h3>
+<h3 class="topic">
+<a name="5nvfofetfnui48pib6pm7nsoqd">&nbsp;&nbsp;&nbsp;如果只用 AOF，优先使用 everysec 的配置选项，因为它在可靠性和性能之间取了一个平衡</a>
+</h3>
+<h3 class="topic">
+<a name="79t3lgo286e52b214afj1ndobl">&nbsp;缓存淘汰策略</a>
+</h3>
+<h3 class="topic">
+<a name="5mupv780i3ac0frepeb3tqhk7c">&nbsp;&nbsp;voltile-lru</a>
+</h3>
+<h3 class="topic">
+<a name="5u933sk8rdl5k3omfmpd66d4pl">&nbsp;&nbsp;&nbsp;从已设置过期时间的数据集（server.db[i].expires）中挑选最近最少使用的数据淘汰</a>
+</h3>
+<h3 class="topic">
+<a name="7ioh0c1m8ot7oqc6ofjm4l7cst">&nbsp;&nbsp;volatitle-lru</a>
+</h3>
+<h3 class="topic">
+<a name="2q01cvrc4nsrtjvn1mj3atvc4k">&nbsp;&nbsp;&nbsp;从已设置过期时间的数据集（server.db[i].expires）中挑选将要过期的数据淘汰</a>
+</h3>
+<h3 class="topic">
+<a name="0imiup42b31ps82d7rcdsh0etb">&nbsp;&nbsp;volatile-random</a>
+</h3>
+<h3 class="topic">
+<a name="4lvqn882nunl23fqs24nrrbtue">&nbsp;&nbsp;&nbsp;从已设置过期时间的数据集（server.db[i].expires）中任意选择数据淘汰</a>
+</h3>
+<h3 class="topic">
+<a name="1tulemblc2uhtqnis6shfltsfp">&nbsp;&nbsp;allkeys-lru</a>
+</h3>
+<h3 class="topic">
+<a name="0a9bi0nuqecah06iuu7jg9ggao">&nbsp;&nbsp;&nbsp;从数据集（server.db[i].dict）中挑选最近最少使用的数据淘汰</a>
+</h3>
+<h3 class="topic">
+<a name="5217l3kck3c8kef7r68egltor0">&nbsp;&nbsp;allkeys-random</a>
+</h3>
+<h3 class="topic">
+<a name="4omndbehias0nmec2hov8r80h1">&nbsp;&nbsp;&nbsp;从数据集（server.db[i].dict）中任意选择数据淘汰</a>
+</h3>
+<h3 class="topic">
+<a name="7g7rdqij8rqlhhouigkbudnmvg">&nbsp;&nbsp;no-enviction</a>
+</h3>
+<h3 class="topic">
+<a name="72kj39k7jb5inopm78auga13bn">&nbsp;&nbsp;&nbsp;禁止驱逐数据</a>
+</h3>
+<h3 class="topic">
+<a name="6u7e7qo0s1lh6d5jcs700a2pst">&nbsp;过期策略</a>
+</h3>
+<h3 class="topic">
+<a name="0cfj16r3r23u0aq4l4ps9hvc59">&nbsp;&nbsp;惰性过期</a>
+</h3>
+<h3 class="topic">
+<a name="40jtj8egd5fvoi7e2grlh65q0n">&nbsp;&nbsp;&nbsp;只有当访问一个key时，才会判断该key是否已过期，过期则清除。该策略可以最大化地节省CPU资源，却对内存非常不友好。极端情况可能出现大量的过期key没有再次被访问，从而不会被清除，占用大量内存</a>
+</h3>
+<h3 class="topic">
+<a name="46ovj3il1nkimmr1f0in3bcek1">&nbsp;&nbsp;定期过期</a>
+</h3>
+<h3 class="topic">
+<a name="1js4ei128f2cgoa3q3ie25qg45">&nbsp;&nbsp;&nbsp;每隔一定的时间，会扫描expires字典中的key，查找清除其中已过期的key</a>
+</h3>
+<h3 class="topic">
+<a name="321rcjr146qv8ce9cis523k1v7">&nbsp;&nbsp;&nbsp;限定定时任务执行的时间，避免对其他请求的执行造成影响</a>
+</h3>
+<h3 class="topic">
+<a name="7haqfqo09jkglnd7cgbdqjb0l1">&nbsp;主从复制</a>
+</h3>
+<h3 class="topic">
+<a name="4157u8vs7j2p4fl4mr6vanl8il">&nbsp;&nbsp;保证了redis的高可用性；数据备份；读写分离；</a>
+</h3>
+<h3 class="topic">
+<a name="1137mvbtm52rupn0jmfb5dntcc">&nbsp;&nbsp;实现</a>
+</h3>
+<h3 class="topic">
+<a name="62ubl4h2l0gjco8mbs39j9d4e9">&nbsp;&nbsp;&nbsp;replicaof  主库ip 主库port（Redis 5.0之前使用 slaveof）</a>
+</h3>
+<h3 class="topic">
+<a name="15d0bt6l7tv1rc9j34h31brshv">&nbsp;&nbsp;&nbsp;1、从库给主库发送 psync 命令，表示要进行数据同步，psync 命令包含了主库的 runID 和复制进度 offset </a>
+</h3>
+<h3 class="topic">
+<a name="4l2vm52gvkn6u7hofdp7nvq9e2">&nbsp;&nbsp;&nbsp;2、主库收到 psync 命令后，会用 FULLRESYNC 响应命令带上两个参数：主库 runID 和主库目前的复制进度 offset，返回给从库。从库收到响应后，会记录下这两个参数</a>
+</h3>
+<h3 class="topic">
+<a name="1cn80afu58d2erhrl2qev8c6hf">&nbsp;&nbsp;&nbsp;3、主库执行 bgsave 命令，生成 RDB 文件，同步给从库；在主库同步从库的过程中，主库不会阻塞，可以正常接收请求，写请求会被写入replication buffer中，主库同步完RDB文件后，会将replication buffer中的数据发送给从库</a>
+</h3>
+<h3 class="topic">
+<a name="7v6jkmmf0tetlp35gj53oul8bl">&nbsp;&nbsp;&nbsp;4、从库接收到RDB 文件后，会先清空当前数据库，然后加载 RDB 文件</a>
+</h3>
+<h3 class="topic">
+<a name="3fkko8s9nlkd8tdfobok5h3228">&nbsp;&nbsp;全量复制</a>
+</h3>
+<h3 class="topic">
+<a name="7d8kt35glq59aq3s5gcphm7til">&nbsp;&nbsp;&nbsp;在 Redis 2.8 之前，Redis 基本只支持全量复制。在 slave 与 master 断开连接，或 slave 重启后，都需要进行全量复制</a>
+</h3>
+<h3 class="topic">
+<a name="68qm4829sdejstos7qeqlltrqc">&nbsp;&nbsp;增量复制</a>
+</h3>
+<h3 class="topic">
+<a name="07kqfu47qpesdt3qak679lsmal">&nbsp;&nbsp;&nbsp;在 2.8 版本之后，Redis 引入 psync，增加了一个复制积压缓冲，在将写指令同步给 slave 时，会同时在复制积压缓冲中也写一份。在 slave 短时断开重连后，上报master runid 及复制偏移量。如果 runid 与 master 一致，且偏移量仍然在 master 的复制缓冲积压中，则 master 进行增量同步。如果发生切换master，runid 会变化，仍然需要全量同步</a>
+</h3>
+<h3 class="topic">
+<a name="63tp35p5jp77uuhme4dvopa53t">&nbsp;&nbsp;&nbsp;4.0强化了psync，引入了 psync2。在 pysnc2 中，主从复制不再使用 runid，而使用 replid（即复制id） 来作为复制判断依据</a>
+</h3>
+<h3 class="topic">
+<a name="6lv3v0bqhn2rae5atjd4k3kqic">&nbsp;&nbsp;&nbsp;在 psync2 中，Redis 每个实例除了会有一个replid外，还有一个 replid2。Redis 启动后，会为 replid分配初值，在建立主从连接后，会用 master的 replid 替换自己的 replid。同时会用replid2存储上次 master 主库的 replid。这样切主时，即便 slave 汇报的复制 id 与新 master 的 replid 不同，但和新 master 的 replid2 相同，同时复制偏移仍然在复制积压缓冲区内，仍然可以实现增量复制。</a>
+</h3>
+<h3 class="topic">
+<a name="232l9513v75s168oernpd31gkc">&nbsp;&nbsp;脑裂</a>
+</h3>
+<h3 class="topic">
+<a name="5l8t8nolu7tefc08mrri48basq">&nbsp;&nbsp;&nbsp;发生原因</a>
+</h3>
+<h3 class="topic">
+<a name="1pd6krmqthc853ggqk9h1ss2ra">&nbsp;&nbsp;&nbsp;&nbsp;客户端与redis主库通信良好</a>
+</h3>
+<h3 class="topic">
+<a name="0qvub2clbsnbsbhn1viqitv73a">&nbsp;&nbsp;&nbsp;&nbsp;redis主库与哨兵集群发生网络分区，认为redis主库宕机</a>
+</h3>
+<h3 class="topic">
+<a name="6gd5b45t8h7o9dba5f8g8udhhr">&nbsp;&nbsp;&nbsp;&nbsp;哨兵提升从库为主库</a>
+</h3>
+<h3 class="topic">
+<a name="430f9c1d85jeculb79hu40gg97">&nbsp;&nbsp;&nbsp;&nbsp;原主库执行slave of命令，和主库进行t全量复制，先清空本地数据，在加载主库发送的RDB文件</a>
+</h3>
+<h3 class="topic">
+<a name="6d48qn60eqkl6o812gegt6ri00">&nbsp;&nbsp;&nbsp;&nbsp;和主库部署在同一台服务器上的其他程序临时占用了大量资源（例如 CPU 资源），导致主库资源使用受限</a>
+</h3>
+<h3 class="topic">
+<a name="640lj8jtl830cvur8ge1g76qk1">&nbsp;&nbsp;&nbsp;&nbsp;主库自身遇到了阻塞的情况，例如，处理 bigkey 或是发生内存 swap、或者Lua脚本中执行操作过多</a>
+</h3>
+<h3 class="topic">
+<a name="1nt424gm94oskn0v9dl543cm2v">&nbsp;&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="1mq2n67ih0voocb69dj6oqq1hk">&nbsp;&nbsp;&nbsp;&nbsp;min-slaves-to-write：主库能进行数据同步的最少从库数量</a>
+</h3>
+<h3 class="topic">
+<a name="6nnsj7ue10egrima6qk5cfvfqa">&nbsp;&nbsp;&nbsp;&nbsp;min-slaves-max-lag：主从库间进行数据复制时，从库给主库发送ACK 消息的最大延迟（以秒为单位）</a>
+</h3>
+<h3 class="topic">
+<a name="1nefo3l5sfielqv29rq39dbvom">&nbsp;&nbsp;主从不一致问题</a>
+</h3>
+<h3 class="topic">
+<a name="5vpc9n9k5b7ok2fjt44qed0fed">&nbsp;&nbsp;&nbsp;发生原因：由于主从库间的命令复制是异步进行的，客户端从从库中读取到的值和主库中的最新值并不一致</a>
+</h3>
+<h3 class="topic">
+<a name="58g5odrua1n0fl6hrcopo62phn">&nbsp;&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="60r1uuvhdubf4jsiosbjcqksu1">&nbsp;&nbsp;&nbsp;&nbsp;保证主从间的通络通信良好，避免主从实例跨机房部署</a>
+</h3>
+<h3 class="topic">
+<a name="3dbn52afi1gb6elr5p0s4j978n">&nbsp;&nbsp;&nbsp;&nbsp;监控主从库间的复制进度（ INFO replication 命令可以查看主库接收写命令的进度信息（master_repl_offset）和从库复制写命令的进度信息（slave_repl_offset））</a>
+</h3>
+<h3 class="topic">
+<a name="7itl5t9cd4j5v2mr3l8jl8bbmf">&nbsp;&nbsp;读取过期数据</a>
+</h3>
+<h3 class="topic">
+<a name="7hif83hq5l9mot75fir5p0b0gn">&nbsp;&nbsp;&nbsp;原因</a>
+</h3>
+<h3 class="topic">
+<a name="1gubi457g7ufv0usclqctpv7jk">&nbsp;&nbsp;&nbsp;&nbsp;应用主从集群时，尽量使用 Redis 3.2 及以上版本，之前版本中从库在服务读请求时，并不会判断数据是否过期，而是会返回过期数据</a>
+</h3>
+<h3 class="topic">
+<a name="4v9a6lcboqcrp11np1l991hj29">&nbsp;&nbsp;&nbsp;&nbsp;数据过期命令使用不当</a>
+</h3>
+<h3 class="topic">
+<a name="4pc1tch3uah3tuq463tt71gmpg">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;EXPIRE 和 PEXPIRE：它们给数据设置的是从命令执行时开始计算的存活时间</a>
+</h3>
+<h3 class="topic">
+<a name="3ancpjqv1smeqsftrpo2i406t9">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;EXPIREAT 和 PEXPIREAT：它们会直接把数据的过期时间设置为具体的一个时间点</a>
+</h3>
+<h3 class="topic">
+<a name="0h1l2n9ttj1jkiq4q06stebiht">&nbsp;&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="26o4a6broh2jjc4g8u2ksjksdk">&nbsp;&nbsp;&nbsp;&nbsp;使用 Redis 3.2 及以上版本；</a>
+</h3>
+<h3 class="topic">
+<a name="5tv3ijgfv8spd1qu2dd4jgnjar">&nbsp;&nbsp;&nbsp;&nbsp;使用 EXPIREAT/PEXPIREAT 命令设置过期时间(主从节点上的时钟保持一致，主从节点和相同的NTP 服务器进行时钟同步)</a>
+</h3>
+<h3 class="topic">
+<a name="5cejk6pmqoa6rv10bh98q4u3vo">&nbsp;&nbsp;配置参数</a>
+</h3>
+<h3 class="topic">
+<a name="4b6pet8h9kk0v6mcasrv9itei2">&nbsp;&nbsp;&nbsp;protected-mode ：限定哨兵实例能否被其他服务器访问，设置为 no 时，其他服务器也可以访问这个哨兵实例</a>
+</h3>
+<h3 class="topic">
+<a name="0qr3veah0bq9bu58690e64tsnc">&nbsp;&nbsp;&nbsp;bind：设置为其它哨兵实例的 IP 地址。只有在 bind 中设置了 IP 地址的哨兵，才可以访问当前实例</a>
+</h3>
+<h3 class="topic">
+<a name="7mm432most99nu6ssl0edn3p53">&nbsp;&nbsp;主从复制不要用图状结构，用单向链表结构更为稳定</a>
+</h3>
+<h3 class="topic">
+<a name="37o0a4gp5920oc5ceil4s69981">&nbsp;哨兵机制</a>
+</h3>
+<h3 class="topic">
+<a name="2dco0pi9citcrtb0fa9oc350ej">&nbsp;&nbsp;实现主从库的自动切换，实现故障转移，保证写的高可用</a>
+</h3>
+<h3 class="topic">
+<a name="2e462481a3trja887nm46ofc0d">&nbsp;&nbsp;流程</a>
+</h3>
+<h3 class="topic">
+<a name="13r73kbi8lr9ja0k5oqf3ldnnk">&nbsp;&nbsp;&nbsp;监控，如何判断主库挂了</a>
+</h3>
+<h3 class="topic">
+<a name="4o81qh0oagfsps288a1ug4a6ml">&nbsp;&nbsp;&nbsp;&nbsp;主观下线</a>
+</h3>
+<h3 class="topic">
+<a name="62g1gcn61o8qipq16ajce6hvjc">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;哨兵进程会使用 PING 命令检测它自己和主、从库的网络连接情况，用来判断实例的状态</a>
+</h3>
+<h3 class="topic">
+<a name="7i3tbk5r7i429dficnrr1un1fs">&nbsp;&nbsp;&nbsp;&nbsp;客观下线</a>
+</h3>
+<h3 class="topic">
+<a name="6946nuinmehjq4hcso3r921q06">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;大多数的哨兵实例，都判断主库已经&ldquo;主观下线&rdquo;了，主库才会被标记为&ldquo;客观下线&rdquo;</a>
+</h3>
+<h3 class="topic">
+<a name="6c660titjob415lo6ubs7oakaa">&nbsp;&nbsp;&nbsp;选主</a>
+</h3>
+<h3 class="topic">
+<a name="78sbdq6db2t4l1aogs36oef3lo">&nbsp;&nbsp;&nbsp;&nbsp;首先筛选加选主操作的从节点：当前在线并且之前的网络连接状态良好的从节点</a>
+</h3>
+<h3 class="topic">
+<a name="53lsfpj7a5ihrpnqcd1jh89ils">&nbsp;&nbsp;&nbsp;&nbsp;从库打分，选出适合当做主节点的从节点</a>
+</h3>
+<h3 class="topic">
+<a name="1m2svoba8l75g1412tru0crosg">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;优先级最高的从库得分高，通过 slave-priority 配置项，给不同的从库设置不同优先级</a>
+</h3>
+<h3 class="topic">
+<a name="5ijhnuif205g2q3cnekin52eql">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;和旧主库同步程度最接近的从库得分高</a>
+</h3>
+<h3 class="topic">
+<a name="12h3d2th64ue9p49kgn93v5qqk">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ID 号小的从库得分高</a>
+</h3>
+<h3 class="topic">
+<a name="6o3ua6aih6cko6q8i1i7bsiamo">&nbsp;&nbsp;&nbsp;通知</a>
+</h3>
+<h3 class="topic">
+<a name="6vhpr65quc08gqagrik667uht0">&nbsp;&nbsp;&nbsp;&nbsp;通知从库和客户端</a>
+</h3>
+<h3 class="topic">
+<a name="6d0kt8kc4ua9loilkjug12ut5e">&nbsp;&nbsp;哨兵集群</a>
+</h3>
+<h3 class="topic">
+<a name="4htluk7s5vpp6h76loitgeoe7v">&nbsp;&nbsp;&nbsp;基于发布订阅机制组成的哨兵集群</a>
+</h3>
+<h3 class="topic">
+<a name="3i7kdglstp6ujc7phnes4t3l85">&nbsp;&nbsp;&nbsp;&nbsp;主库上有一个名为&ldquo;__sentinel__:hello&rdquo;的频道，哨兵实例向此频道发布自己的IP地址和端口号，同时订阅此频道，知晓哨兵集群中其他的哨兵实例，彼此之间建立连接，哨兵实例通过向主库发送info命令，获取从库的ip和port，并建立连接</a>
+</h3>
+<h3 class="topic">
+<a name="4higkl0q51ffs4tuta166t4pn6">&nbsp;Redis Cluster</a>
+</h3>
+<h3 class="topic">
+<a name="04sghs4qtarql5g5i4u0r1b2h1">&nbsp;&nbsp;实现数据分片集群，定义了数据和实例的对应规则</a>
+</h3>
+<h3 class="topic">
+<a name="767eukrqmnuftc2os04hbhaghh">&nbsp;&nbsp;用哈希槽（Hash Slot），来处理数据和实例之间的映射关系.一个切片集群共有 16384个哈希槽</a>
+</h3>
+<h3 class="topic">
+<a name="22tbfcigniflk6c54kbgaida9u">&nbsp;&nbsp;创建集群时，Redis会自动把这16384个槽平均分布在集群实例上</a>
+</h3>
+<h3 class="topic">
+<a name="0731fbgf80cosdioetvp1qf8h3">&nbsp;&nbsp;限制Redis Cluster规模的关键因素</a>
+</h3>
+<h3 class="topic">
+<a name="71497cbbb25vmsrjpfjfjsbpsp">&nbsp;&nbsp;&nbsp;心跳消息大小会影响到通信开销</a>
+</h3>
+<h3 class="topic">
+<a name="1hr3icbi8fbjui9rbb6hfa3ufe">&nbsp;&nbsp;&nbsp;&nbsp;默认每个1秒发送一条 PING 消息，PING 消息中封装了发送消息的实例自身的状态信息、部分其它实例的状态信息，以及 Slot 映射表；一个实例在接收到 PING 消息后，会给发送 PING 消息的实例，发送一个 PONG 消息。PONG 消息包含的内容和 PING 消息一样。</a>
+</h3>
+<h3 class="topic">
+<a name="1fgu4kdl764v6cho3spg4c6fri">&nbsp;&nbsp;&nbsp;通信频繁</a>
+</h3>
+<h3 class="topic">
+<a name="3ge8fmo0064omiqdp47fkf64lr">&nbsp;&nbsp;&nbsp;&nbsp;每个实例每 100 毫秒会做一次检测，给 PONG 消息接收超过 cluster-node-timeout/2的节点发送 PING 消息。</a>
+</h3>
+<h3 class="topic">
+<a name="1i8i9n6l3hbbauvf53hv4qlj6a">&nbsp;&nbsp;&nbsp;优化</a>
+</h3>
+<h3 class="topic">
+<a name="75eh2l7oqgaajv5cn2lq99f9go">&nbsp;&nbsp;&nbsp;&nbsp;配置项 cluster-node-timeout 定义了集群实例被判断为故障的心跳超时时间，默认是 15秒；如果 cluster-node-timeout 值比较小，在大规模集群中，就会比较频繁地出现 PONG 消息接收超时的情况，从而导致实例频繁的给 PONG 消息超时的实例发送 PING 消息&rdquo;这个操作；将此配置项适当提高，可以降低发送心跳的频率</a>
+</h3>
+<h3 class="topic">
+<a name="41pmq8fai8jd7jpj2ektgpqetk">&nbsp;消息模式</a>
+</h3>
+<h3 class="topic">
+<a name="1e91pea5ived4bh8th2oe68i2m">&nbsp;&nbsp;队列模式</a>
+</h3>
+<h3 class="topic">
+<a name="07ssik5a7sg9d8d7ad7rpt21eo">&nbsp;&nbsp;&nbsp;list类型的lpush和rpop实现消息队列；消息接收方如果不知道队列中是否有消息，会一直发送rpop命令，如果这样的话，会每一次都建立一次连接，这样显然不好。&#13;
+* 可以使用brpop命令，它如果从队列中取不出来数据，会一直阻塞，在一定范围内没有取出则返回null</a>
+</h3>
+<h3 class="topic">
+<a name="5q34sao3tmfdm2pl36qvv3v34k">&nbsp;&nbsp;发布订阅模式</a>
+</h3>
+<h3 class="topic">
+<a name="2ghr79nh4e6gmoh477jm8jumgo">&nbsp;&nbsp;&nbsp;subscribe、publish </a>
+</h3>
+<h3 class="topic">
+<a name="5la9fi4eem3fhv6c48ui55ob1d">&nbsp;高性能的原因</a>
+</h3>
+<h3 class="topic">
+<a name="4d1q6nt59nfj7kenihh3nvg3pj">&nbsp;&nbsp;大部分操作都在内存中完成</a>
+</h3>
+<h3 class="topic">
+<a name="6vkifr62qfljuc3t84rrngf7bo">&nbsp;&nbsp;单线程模式</a>
+</h3>
+<h3 class="topic">
+<a name="6vtpolak12nra86q9ecr7keki1">&nbsp;&nbsp;&nbsp;Redis 的网络 IO和键值对读写是由一个线程来完成的，这也是 Redis 对外提供键值存储服务的主要流程。但 Redis 的其他功能，比如持久化、异步删除、集群数据同步等，其实是由额外的线程执行的。</a>
+</h3>
+<h3 class="topic">
+<a name="2uaf62bgq67stmaklj7ack2ecl">&nbsp;&nbsp;&nbsp;避免了上下文切换</a>
+</h3>
+<h3 class="topic">
+<a name="599pbg7t1ooot86ph4scvl0cgl">&nbsp;&nbsp;高效的数据结构，底层的存储结构并不是一成不变的，会根据存储的类型和元素的个数选择合适的数据结构，在时间复杂度和空间复杂度之间做权衡</a>
+</h3>
+<h3 class="topic">
+<a name="588khae21pcvs4j5kdormmiu9f">&nbsp;&nbsp;Redis 采用了 I/O 多路复用机制，处理大量的客户端 Socket 请求</a>
+</h3>
+<h3 class="topic">
+<a name="68966agtgc3051geh45g0g3963">&nbsp;&nbsp;Redis 4.0 版本之后，Redis 添加了多线程的支持，但这时的多线程主要体现在大数据的异步删除功能上</a>
+</h3>
+<h3 class="topic">
+<a name="4s8shevdb3216qn9pj59r6h219">&nbsp;指令安全</a>
+</h3>
+<h3 class="topic">
+<a name="2d30u399ejtufavgdnrbiga1ar">&nbsp;&nbsp; keys 指令会导致 Redis 卡顿；flushdb 和 flushall 会让 Redis 的所有数据全 部清空</a>
+</h3>
+<h3 class="topic">
+<a name="5nrnhapv214eo1t4vr6994inqp">&nbsp;&nbsp; rename-command 指令用于将某些危险的指令修改成特别的 名称，用来避免人为误操作</a>
+</h3>
+<h3 class="topic">
+<a name="03t2ns3ulc1jm283vcul35m8lm">&nbsp;&nbsp;密码访问限制</a>
+</h3>
+<h3 class="topic">
+<a name="0q5cc38dc5djakhl89g8qtohak">&nbsp;安全通信</a>
+</h3>
+<h3 class="topic">
+<a name="37qaqn05dg4tdsst6sl8bmtvb4">&nbsp;&nbsp;spiped SSL代理软件</a>
+</h3>
+<h3 class="topic">
+<a name="71piodb15t8p65o0mc00rs7vl6">&nbsp;内存碎片</a>
+</h3>
+<h3 class="topic">
+<a name="28ilahhpi4oqjtvoqb9554c6di">&nbsp;&nbsp;原因</a>
+</h3>
+<h3 class="topic">
+<a name="5en8cg0hstregqvtkbcb1au5rj">&nbsp;&nbsp;&nbsp;内存分配器一般是按固定大小来分配内存，不会完全按照应用程序申请的内存空间大小给程序分配</a>
+</h3>
+<h3 class="topic">
+<a name="1otl0l7kr4q19f0ssjd5i1p5ei">&nbsp;&nbsp;&nbsp;redis中的键值对不小不一，并且增删改</a>
+</h3>
+<h3 class="topic">
+<a name="15idanl2kbpbv3mdvrv4bnjt49">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="0f5b4beculvmc7sitjt7vleghd">&nbsp;&nbsp;&nbsp;监控内存碎片率，INFO 命令，可以用来查询内存使用的详细信息，其中的mem_fragmentation_ratio 表示的就是 Redis 当前的内存碎片率</a>
+</h3>
+<h3 class="topic">
+<a name="3hv000j4863udi1okp8f585dkc">&nbsp;&nbsp;&nbsp;重启redis实例</a>
+</h3>
+<h3 class="topic">
+<a name="39qdmt3l1ho016g6384t4ts2rm">&nbsp;&nbsp;&nbsp;自动内存碎片清理</a>
+</h3>
+<h3 class="topic">
+<a name="5uvjakekmmo1q1uburtp176egi">&nbsp;&nbsp;&nbsp;&nbsp;config set activedefrag yes：启用了自动清理功能</a>
+</h3>
+<h3 class="topic">
+<a name="13bnn7qtm7ed976627nm2b121o">&nbsp;&nbsp;&nbsp;&nbsp;active-defrag-ignore-bytes 100mb：表示内存碎片的字节数达到 100MB 时，开始清理；</a>
+</h3>
+<h3 class="topic">
+<a name="5sjq085u0ep17hr019p8t3l9g1">&nbsp;&nbsp;&nbsp;&nbsp;active-defrag-threshold-lower 10：表示内存碎片空间占操作系统分配给 Redis 的总空间比例达到 10% 时，开始清理</a>
+</h3>
+<h3 class="topic">
+<a name="72te516jhus6icdc920u2dlkpd">&nbsp;&nbsp;&nbsp;&nbsp;active-defrag-cycle-min 25： 表示自动清理过程所用 CPU 时间的比例不低于25%</a>
+</h3>
+<h3 class="topic">
+<a name="13arb1uon3br5qc09cj11megf5">&nbsp;&nbsp;&nbsp;&nbsp;active-defrag-cycle-max 75：表示自动清理过程所用 CPU 时间的比例不高于75%</a>
+</h3>
+<h3 class="topic">
+<a name="4c57fc510kb97mt6pp70qb20r3">&nbsp;NVM（非易失存储）</a>
+</h3>
+<h3 class="topic">
+<a name="19m31c58a73d0mhmvffp0d14fm">&nbsp;&nbsp;可以直接持久化保存数据</a>
+</h3>
+<h3 class="topic">
+<a name="6c56jfldf8v5itn5firc8m3mm6">&nbsp;&nbsp;NVM 内存的访问速度接近 DRAM 的速度</a>
+</h3>
+<h3 class="topic">
+<a name="0dvht9ovb3v8rr7s6mefk8ftg9">&nbsp;&nbsp;NVM 内存的容量很大</a>
+</h3>
+<h3 class="topic">
+<a name="4ibor30sckqrdm3cp662msp29e">&nbsp;原子操作方法</a>
+</h3>
+<h3 class="topic">
+<a name="4g0v5onsekctng0cbeo53i8eqd">&nbsp;&nbsp;把多个操作在 Redis 中实现成一个操作，也就是单命令操作</a>
+</h3>
+<h3 class="topic">
+<a name="4hji1l7fgm57fbgc1ssomrn922">&nbsp;&nbsp;把多个操作写到一个 Lua 脚本中，以原子性方式执行单个 Lua 脚本</a>
+</h3>
+<h3 class="topic">
+<a name="3nte68rau2vbkmeu4dgoulbn81">&nbsp;6.0新特性</a>
+</h3>
+<h3 class="topic">
+<a name="605vu634qen5h7rncjfr65d5oe">&nbsp;&nbsp;多个IO线程处理网络请求，但是对于读写命令，还是单线程处理</a>
+</h3>
+<h3 class="topic">
+<a name="0bt2er53duqbl2e033r3uslvno">&nbsp;&nbsp;客户端缓存（Tracking）</a>
+</h3>
+<h3 class="topic">
+<a name="6qvuevunk52rgqu50bk1bfmg0u">&nbsp;&nbsp;&nbsp;普通模式(ESP 3 协议)</a>
+</h3>
+<h3 class="topic">
+<a name="4oa7h4ebronq5i4nqc0e86ofcs">&nbsp;&nbsp;&nbsp;&nbsp;打开或关闭普通模式下的 Tracking 功能：CLIENT TRACKING ON|OFF</a>
+</h3>
+<h3 class="topic">
+<a name="6uojubivu9craj4hckgeml929e">&nbsp;&nbsp;&nbsp;&nbsp;服务端记录客户端读取过的 key，一旦监测到 key 的值发生变化，服务端会给客户端发送 invalidate 消息，通知客户端缓存失效了</a>
+</h3>
+<h3 class="topic">
+<a name="7hhgl1qmhvipmls6kv818dtqtr">&nbsp;&nbsp;&nbsp;广播模式(ESP 3 协议)</a>
+</h3>
+<h3 class="topic">
+<a name="4f9cl9rigoqvt4u2h8p94cq2jn">&nbsp;&nbsp;&nbsp;&nbsp;注册需要跟踪的key:LIENT TRACKING ON BCAST PREFIX user</a>
+</h3>
+<h3 class="topic">
+<a name="7a3c5u13imeg3obhe235mlgp1g">&nbsp;&nbsp;&nbsp;&nbsp;在广播模式下，即使客户端还没有读取过 key，但只要它注册了要跟踪的 key，服务端都会把key 失效消息通知给这个客户端</a>
+</h3>
+<h3 class="topic">
+<a name="7kp6p0s2aruoh35l4gr6nkob3s">&nbsp;&nbsp;&nbsp;重定向模式（ESP 2 协议）</a>
+</h3>
+<h3 class="topic">
+<a name="6tn7skuv8lml26dcpujdlsqrsp">&nbsp;&nbsp;&nbsp;&nbsp;订阅用于发送失效消息的频道 _redis_:invalidate。同时，另外一个客户端，执行 CLIENT TRACKING 命令，设置服务端将失效消息转发给使用 RESP 2 协议的客户端。</a>
+</h3>
+<h2 class="topic">
+<a name="7c2nbeig2uomecj83fajf0vdqe">Codis</a>
+</h2>
+<h3 class="topic">
+<a name="540ieauc1lrjmlmqf2en630rvo">&nbsp;codis server</a>
+</h3>
+<h3 class="topic">
+<a name="4dlb6ljk7uqtreincml89rjjq2">&nbsp;&nbsp;Codis 项目维护的一个 Redis 分支, 基于 2.8.21 开发, 加入了 slot 的支持和原子的数据迁移指令.</a>
+</h3>
+<h3 class="topic">
+<a name="54p4mlp8brnp7s719o189clu23">&nbsp;codis proxy</a>
+</h3>
+<h3 class="topic">
+<a name="5uhoi363hkm3203m757t5en7h5">&nbsp;&nbsp;客户端连接的 Redis 代理服务, 实现了 Redis 协议,codis-proxy 本身是无状态的.灵活方便的进行扩缩容</a>
+</h3>
+<h3 class="topic">
+<a name="26l01anmokosj7h2nvjdc6c7r7">&nbsp;zookeeper</a>
+</h3>
+<h3 class="topic">
+<a name="4biu80l4holkol9fdkqslrov6b">&nbsp;&nbsp;放数据路由表和 codis-proxy 节点的元信息, codis-config 发起的命令都会通过 ZooKeeper 同步到各个存活的 codis-proxy.</a>
+</h3>
+<h3 class="topic">
+<a name="36kab3btejtcpqqmm0cf1g8ka7">&nbsp;codis dashboard</a>
+</h3>
+<h3 class="topic">
+<a name="61jf46p8fchkdcpkvs4lt42qq2">&nbsp;&nbsp;直接在浏览器上观察 Codis 集群的运行状态</a>
+</h3>
+<h3 class="topic">
+<a name="39eji0t2b1p4lvlbav4b7lfu4n">&nbsp;codis config</a>
+</h3>
+<h3 class="topic">
+<a name="60lsejjc9ufh1b97f02b82seuf">&nbsp;&nbsp;管理工具, 支持包括, 添加/删除 Redis 节点, 添加/删除 Proxy 节点, 发起数据迁移等操作.</a>
+</h3>
+<h2 class="topic">
+<a name="12150sc773hj5h7f11luub70ic">twemproxy</a>
+</h2>
+<h3 class="topic">
+<a name="38cft3a5ghblarovi84e8qkhh4">&nbsp;Twitter开源，分片资源访问的代理组件，封装后端资源池及 hash 规则</a>
+</h3>
+<h3 class="topic">
+<a name="1f3konv79s7qoo0fvjam7q6904">&nbsp;让client访问尽可能简单，后端资源增加或减少时，只要在 Twemproxy 变更即可</a>
+</h3>
+<h3 class="topic">
+<a name="5vdbkatgbj97bou0t2hscpmmb4">&nbsp;Twemproxy 跟后端通过单个长连接访问，避免了众多的client与后端资源直接建立连接，导致后端资源维护众多的连接，减轻后端资源的连接压力</a>
+</h3>
+<h2 class="topic">
+<a name="0jl0o8parmlhn9ha00s3s6rrsl">Guava cache</a>
+</h2>
+<h3 class="topic">
+<a name="3970ckll2j3gd5l25o33g1b5ov">&nbsp;优势</a>
+</h3>
+<h3 class="topic">
+<a name="6k1g7i6k1j4935lq9un38vla41">&nbsp;&nbsp;缓存过期和淘汰机制</a>
+</h3>
+<h3 class="topic">
+<a name="2567sb4ajorm7i5uo8q1gga03l">&nbsp;&nbsp;&nbsp;可以设置Key的过期时间，包括访问过期和创建过期</a>
+</h3>
+<h3 class="topic">
+<a name="7sia7cqnedt9fl2re5t8le87pn">&nbsp;&nbsp;&nbsp;在缓存容量达到指定大小时，采用LRU的方式，将不常使用的键值从Cache中删除</a>
+</h3>
+<h3 class="topic">
+<a name="33pusah11qrn89j29prdvua3m1">&nbsp;&nbsp;并发处理能力</a>
+</h3>
+<h3 class="topic">
+<a name="78lof70q0tsdfr194pc056g0qu">&nbsp;&nbsp;&nbsp;提供了设置并发级别的api，使得缓存支持并发的写入和读取，采用分离锁机制，分离锁能够减小锁力度，提升并发能力</a>
+</h3>
+<h3 class="topic">
+<a name="3n6l22bm7cc4avbbh326dkf452">&nbsp;&nbsp;更新锁定</a>
+</h3>
+<h3 class="topic">
+<a name="7dksiauett0v8odqbj9vpkf5lc">&nbsp;&nbsp;&nbsp;在高并发下会出现，多次查源并重复回填缓存，可能会造成源的宕机。在CacheLoader的load方法中加以控制，对同一个key，只让一个请求去读源并 回填缓存，其他请求阻塞等</a>
+</h3>
+<h3 class="topic">
+<a name="11muaeeg71hp5teobt9b4q5fra">&nbsp;&nbsp;集成数据源</a>
+</h3>
+<h3 class="topic">
+<a name="1mccod89d3primcgijhijisk0e">&nbsp;&nbsp;&nbsp;集成数据源，在从缓存中读取不到时可以从数据源中读取数据并回填缓存</a>
+</h3>
+<h3 class="topic">
+<a name="6lsg06ocfbabmsf14d99i83oh3">&nbsp;&nbsp;监控缓存加载/命中情况</a>
+</h3>
+<h3 class="topic">
+<a name="2db9mfirjjchr3uf5i56ef2dg3">&nbsp;CacheLoader</a>
+</h3>
+<h3 class="topic">
+<a name="4l3l11n7n9ds600jb02fb6kn66">&nbsp;&nbsp;当缓存不存在时能够自动加载数据到缓存中</a>
+</h3>
+<h3 class="topic">
+<a name="3iq83v03qnct7k8apg9si8i3f7">&nbsp;缓存数据的删除</a>
+</h3>
+<h3 class="topic">
+<a name="38fufk3m65j512t4h7j22kadip">&nbsp;&nbsp;被动删除</a>
+</h3>
+<h3 class="topic">
+<a name="6ujo8jrg2vkjm1tt3i735mju1k">&nbsp;&nbsp;&nbsp;基于数据大小的删除(LRU+FIFO)</a>
+</h3>
+<h3 class="topic">
+<a name="4rrkdc9miiv7qck5o2me79nsll">&nbsp;&nbsp;&nbsp;基于过期时间的删除</a>
+</h3>
+<h3 class="topic">
+<a name="2fki9esreifqtjmlsjcrnoe796">&nbsp;&nbsp;&nbsp;&nbsp;隔多长时间后没有被访问过的key被删除（expireAfterAccess）</a>
+</h3>
+<h3 class="topic">
+<a name="5nvoqcop94n6er4tmg3ma8dglu">&nbsp;&nbsp;&nbsp;&nbsp;写入多长时间后过期（expireAfterWrite）</a>
+</h3>
+<h3 class="topic">
+<a name="3brn06dsj8dim52omk639g5e66">&nbsp;&nbsp;&nbsp;基于引用的删除</a>
+</h3>
+<h3 class="topic">
+<a name="0srigh9m04ju68rbpgjk76rqmu">&nbsp;&nbsp;主动删除</a>
+</h3>
+<h3 class="topic">
+<a name="6otgno1illf3ptf3sfhncj6kn7">&nbsp;&nbsp;&nbsp;单独删除</a>
+</h3>
+<h3 class="topic">
+<a name="35k1d1h6fs1cd8f2komd15pikc">&nbsp;&nbsp;&nbsp;批量删除</a>
+</h3>
+<h3 class="topic">
+<a name="7d1lbppjpik4prclk4semhkap1">&nbsp;&nbsp;&nbsp;清空所有数据</a>
+</h3>
+<h2 class="topic">
+<a name="23vjaq14irb2fv19uc30suquri">Tair</a>
+</h2>
+<h3 class="topic">
+<a name="45pp8uv4cgl3it9e3r0rau78bb">&nbsp;架构</a>
+</h3>
+<h3 class="topic">
+<a name="11lf36gmg1dmtife4dd07lg68a">&nbsp;&nbsp;ConfigServer</a>
+</h3>
+<h3 class="topic">
+<a name="6ia3g9r40rdjg1ms6kk10im8g9">&nbsp;&nbsp;&nbsp;存储数据在集群中的分布信息</a>
+</h3>
+<h3 class="topic">
+<a name="70asdcq9t1imrt0ptgjujtjpis">&nbsp;&nbsp;&nbsp;管理dataserver，通过心跳维护dataserver的状态信息</a>
+</h3>
+<h3 class="topic">
+<a name="5abrdnsbqs86h1rhi2hl1lt8pt">&nbsp;&nbsp;&nbsp;采用一主一备的方式保证可靠性。</a>
+</h3>
+<h3 class="topic">
+<a name="2psti822umne4f2k8f7s490deb">&nbsp;&nbsp;&nbsp;基于一致性Hash算法存储数据，将固定数量的桶(bucket) 设置为Hash环节点，hash(key) 顺时针寻找桶， 桶是负载均衡和数据迁移的基本单位</a>
+</h3>
+<h3 class="topic">
+<a name="6ubtn36qpp1qr914tl0eagin43">&nbsp;&nbsp;&nbsp;创建快照表，保存桶在各节点的分布情况</a>
+</h3>
+<h3 class="topic">
+<a name="3nkslo2nvhee7kjqurjkcolgjc">&nbsp;&nbsp;&nbsp;&nbsp;负载均衡优先</a>
+</h3>
+<h3 class="topic">
+<a name="5g7kaamthjevl0u80qqsggt5dh">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;尽量的把桶均匀的分布到各个data server上</a>
+</h3>
+<h3 class="topic">
+<a name="2mp2tf0slu31110lsju0qs6nfi">&nbsp;&nbsp;&nbsp;&nbsp;位置安全优先</a>
+</h3>
+<h3 class="topic">
+<a name="1mn0nr654vauv326ojgr777hpa">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;一个桶的备份分布在不同的机房、同一机房的不同机架</a>
+</h3>
+<h3 class="topic">
+<a name="0238c6cv3pn07sqkrudkfimnv7">&nbsp;&nbsp;&nbsp;根据一定的策略把每个桶分配同的data server上，尽量保证桶分布的均衡性</a>
+</h3>
+<h3 class="topic">
+<a name="7rueked9r1dkvvgsicb6oj0p30">&nbsp;&nbsp;&nbsp;当dataserver节点增加或减少时，负责桶的迁移</a>
+</h3>
+<h3 class="topic">
+<a name="55ie2o1dhfait3fiaba0e3fls9">&nbsp;&nbsp;&nbsp;支持自定义的备份数，提高数据的可靠性</a>
+</h3>
+<h3 class="topic">
+<a name="78rt7mser1engerbit085kd44e">&nbsp;&nbsp;Dataserver </a>
+</h3>
+<h3 class="topic">
+<a name="32u9gbe38vgj72k5mc2ctcf2hu">&nbsp;&nbsp;&nbsp;负责数据的存储，复制和迁移</a>
+</h3>
+<h2 class="topic">
+<a name="7te3sv3tgv5otm7imgaip1rl50">Pika</a>
+</h2>
+<h3 class="topic">
+<a name="18dela05hm9n78bgutmo0vbpc8">&nbsp;大内存 Redis 实例的潜在问题</a>
+</h3>
+<h3 class="topic">
+<a name="19qltjvcptp1u7cs2ecgerq5s4">&nbsp;&nbsp;实例内存容量大，RDB 文件也会相应增大，RDB文件生成时的fork时长就会增加，这就会导致Redis实例阻塞</a>
+</h3>
+<h3 class="topic">
+<a name="1gboii8qpih8et5fbrdhfurg9q">&nbsp;&nbsp;RDB文件增大后，使用RDB进行恢复的时长也会增加，会导致Redis较长时间无法对外提供服</a>
+</h3>
+<h3 class="topic">
+<a name="2uqk7t3e70c4st3em757h15a4v">&nbsp;&nbsp; RDB 文件增大后，导致全量同步的时长增加，可能会导致复制缓冲区溢出。缓冲区溢出了，主从节点间就会又开始全量同步</a>
+</h3>
+<h3 class="topic">
+<a name="2tm3tuvmr60lt1meb34alrhcge">&nbsp;&nbsp;RDB 文件很大，也会导致主从切换的过程耗时增加，同样会影响业务的可用性</a>
+</h3>
+<h3 class="topic">
+<a name="3nq3fg46614bn599skiceesqmb">&nbsp;整体架构</a>
+</h3>
+<h3 class="topic">
+<a name="0b2clr955pj7gfjrogrdd9humo">&nbsp;&nbsp;线程模块</a>
+</h3>
+<h3 class="topic">
+<a name="5jal4cgailbhj5va414eq9c5j4">&nbsp;&nbsp;&nbsp;请求分发线程</a>
+</h3>
+<h3 class="topic">
+<a name="1tftnb444527ockliui6kpfsi4">&nbsp;&nbsp;&nbsp;&nbsp;专门监听网络端口，一旦接收到客户端的连接请求后，就和客户端建立连接，并把连接交由工作线程处理</a>
+</h3>
+<h3 class="topic">
+<a name="4aqfd0m8q1tnj4envpvq49drj5">&nbsp;&nbsp;&nbsp;工作线程</a>
+</h3>
+<h3 class="topic">
+<a name="0ba8srt77m2dps0s84du7tp7mc">&nbsp;&nbsp;&nbsp;&nbsp;负责接收客户端连接上发送的具体命令请求，并把命令请求封装成 Task，再交给线程池中的线程</a>
+</h3>
+<h3 class="topic">
+<a name="5d0g370eh09n5fl3er8860iabm">&nbsp;&nbsp;&nbsp;线程池</a>
+</h3>
+<h3 class="topic">
+<a name="7qocdtv3176r0kilv05m6l8q0v">&nbsp;&nbsp;&nbsp;&nbsp;进行实际的数据存取处理，处理Task</a>
+</h3>
+<h3 class="topic">
+<a name="3fvog5ldoagpjdcjhh5f21ttmg">&nbsp;&nbsp;binlog</a>
+</h3>
+<h3 class="topic">
+<a name="6grtlprj44vlodh75d5n9bkumt">&nbsp;&nbsp;&nbsp;实现增量命令同步，既节省了内存，还避免了缓冲区溢出</a>
+</h3>
+<h3 class="topic">
+<a name="1s6f62ucbnfmj8c4vi7jta8ktc">&nbsp;&nbsp;Nemo存储模块</a>
+</h3>
+<h3 class="topic">
+<a name="7mv4uaa7unfrp4jm8s069894f8">&nbsp;&nbsp;&nbsp;实现了 Pika 和 Redis 的数据类型兼容，当把Redis服务迁移到Pika时，不用修改业务应用中操作 Redis 的代码</a>
+</h3>
+<h3 class="topic">
+<a name="5ane71ujjctchu26a67jlfnf6i">&nbsp;&nbsp;RocksDB</a>
+</h3>
+<h3 class="topic">
+<a name="44bv3toph8lq65os3hnes340c8">&nbsp;&nbsp;&nbsp;基于SSD保存数据</a>
+</h3>
+<h3 class="topic">
+<a name="4ibncid10dt2so3fhmd1g2i8hu">&nbsp;&nbsp;&nbsp;需要保存数据时，RocksDB 会使用两小块内存空间（Memtable1 和Memtable2）来交替缓存写入的数据。=当有数据要写入，会先把数据写入到Memtable1。等到 Memtable1写满后，RocksDB 再把数据以文件的形式，快速写入底层的 SSD。同时使用 Memtable2 来代替 Memtable1，缓存新写入的数据。等到 Memtable1 的数据都写入SSD了，RocksDB 会在Memtable2写满后，再Memtable1缓存新写入的数据。</a>
+</h3>
+<h3 class="topic">
+<a name="00p6c3rkok3sd2oaergn4b4cv8">&nbsp;&nbsp;如何实现 Redis 数据类型兼容</a>
+</h3>
+<h3 class="topic">
+<a name="3tt6ceij6f8ujdntq7a8oa0o2p">&nbsp;&nbsp;&nbsp;string</a>
+</h3>
+<h3 class="topic">
+<a name="043uogv5n04j5h425mru018hpr">&nbsp;&nbsp;&nbsp;&nbsp;对Redis的String类型来说，本身就是单值的键值对，直接用 RocksDB 保存就行</a>
+</h3>
+<h3 class="topic">
+<a name="63krcbvcp6ddks66sm64bkjjop">&nbsp;&nbsp;&nbsp;list</a>
+</h3>
+<h3 class="topic">
+<a name="6fofsqo78ijgneji32dv6a47mm">&nbsp;&nbsp;&nbsp;&nbsp;数据信息</a>
+</h3>
+<h3 class="topic">
+<a name="34gd3352cedblu3qvbrbfib0c4">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Key：l(1字节)+size(1字节)+key+sequence
+Value:pre seq+next seq+ value +version+ttl</a>
+</h3>
+<h3 class="topic">
+<a name="10r9ebqeaci2bjmebo809dp4t1">&nbsp;&nbsp;&nbsp;&nbsp;元信息</a>
+</h3>
+<h3 class="topic">
+<a name="67hrq123i1th3gdv84lgib4c30">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Key:L(1字节)+key+version+ttl
+Value:length+left seq+right seq+cur seq</a>
+</h3>
+<h3 class="topic">
+<a name="1as8rtbvia3u4q95r234ut2r3l">&nbsp;&nbsp;&nbsp;set</a>
+</h3>
+<h3 class="topic">
+<a name="7obvusvrii44mtl0urpb3j9ia8">&nbsp;&nbsp;&nbsp;&nbsp;Set集合的key 和元素member值，都被嵌入到了 Pika 单值键值对的键当中。单值键值对的key前面有值&ldquo;s&rdquo;，用来表示数据是 Set 类型，同时还有 size 字段，用来表示 key 的大小</a>
+</h3>
+<h3 class="topic">
+<a name="7v2b6i64i25nc08ec98mrsc2u7">&nbsp;&nbsp;&nbsp;&nbsp;Pika 单值键值对的值只保存了数据的版本信息和剩余存活时间</a>
+</h3>
+<h3 class="topic">
+<a name="79aqrchdl63f0k8o7v8dbuk8ki">&nbsp;&nbsp;&nbsp;&nbsp;数据信息</a>
+</h3>
+<h3 class="topic">
+<a name="2hiahqkchbu7i152lrfjtl7hpr">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Key:s+size+key+member
+Value:version+ttl</a>
+</h3>
+<h3 class="topic">
+<a name="05ubghtih0glq6qkc39ju962aa">&nbsp;&nbsp;&nbsp;&nbsp;元信息</a>
+</h3>
+<h3 class="topic">
+<a name="4ftif3sqm1ptb6uarhrv92k2m7">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Key:S+key+version+ttl
+Value:length(元素的个数)</a>
+</h3>
+<h3 class="topic">
+<a name="6ns2ci0a3vl0k5kreb7n470jnp">&nbsp;&nbsp;&nbsp;hash</a>
+</h3>
+<h3 class="topic">
+<a name="12a5usspona0s4kijlqfuj8v8h">&nbsp;&nbsp;&nbsp;&nbsp;Hash集合的key 和元素的field被嵌入到单值键值对的键当中，</a>
+</h3>
+<h3 class="topic">
+<a name="1piphhjdk69jfmp0uqvjm9pb3p">&nbsp;&nbsp;&nbsp;&nbsp;Hash集合元素的value则是嵌入到单值键值对的值当中，并且带有版本信息和剩余存活时间</a>
+</h3>
+<h3 class="topic">
+<a name="4inu7rsbnimqpi7pjemf6ccosr">&nbsp;&nbsp;&nbsp;&nbsp;元信息</a>
+</h3>
+<h3 class="topic">
+<a name="3fmft7jvje6al1in6lkuljhae3">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;key:H(1字节)+key+version+ttl
+value:(field的数量)</a>
+</h3>
+<h3 class="topic">
+<a name="03p3hnutpnata8tiuggkpiqcua">&nbsp;&nbsp;&nbsp;&nbsp;数据信息</a>
+</h3>
+<h3 class="topic">
+<a name="19h7r8e6el32edbpc04qrjlpc3">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;key：h(1字节)+ size（1字节）+ key + filed
+value:value+version+ttl</a>
+</h3>
+<h3 class="topic">
+<a name="0s3qb13hkcbvok3n90ekivj9pt">&nbsp;&nbsp;&nbsp;sorted set</a>
+</h3>
+<h3 class="topic">
+<a name="59evlvlgmldebvr5i8bbbl8ou6">&nbsp;&nbsp;&nbsp;&nbsp;Sorted Set集合key、元素的 score 和 member 值都嵌入到了单值键值对的键当中</a>
+</h3>
+<h3 class="topic">
+<a name="61k69mq3tp3gad30e91apfd716">&nbsp;&nbsp;&nbsp;&nbsp;单值键值对中的值只保存了数据的版本信息和剩余存活时间</a>
+</h3>
+<h3 class="topic">
+<a name="07jn9knk35d2c223qusd3ccckl">&nbsp;&nbsp;&nbsp;&nbsp;Key:z+size+key+member
+Value:score+version+ttl</a>
+</h3>
+<h3 class="topic">
+<a name="32a5uiab2h1uvhj5mp9375rch3">&nbsp;&nbsp;&nbsp;&nbsp;Key:z+size+key+score+member
+Value:version+ttl</a>
+</h3>
+<h3 class="topic">
+<a name="1enhruafvi8fkj1e7codarfpdc">&nbsp;&nbsp;&nbsp;&nbsp;Key:Z+key+version+ttl
+Value:length(元素的个数)</a>
+</h3>
+<h3 class="topic">
+<a name="6f1c3rp9v6me07np5nmaip5eav">&nbsp;优势</a>
+</h3>
+<h3 class="topic">
+<a name="1fgchrpn5l79ep4gv3fc7k52qm">&nbsp;&nbsp; 单实例能保存更多的数据了，实现了实例数据扩容</a>
+</h3>
+<h3 class="topic">
+<a name="0rekv8d5jajcoe83hfjsj9e3t5">&nbsp;&nbsp;实例重启快</a>
+</h3>
+<h3 class="topic">
+<a name="64u3ka2du3f8l3nfpleqcj6aue">&nbsp;&nbsp;无需担心复制缓冲区的溢出触发从发的全量复制</a>
+</h3>
+<h3 class="topic">
+<a name="5ajbdrpuat0qkgcj5gnj54ji2t">&nbsp;不足</a>
+</h3>
+<h3 class="topic">
+<a name="3j0gvpshdhvr67lq842o1c2rhs">&nbsp;&nbsp;当把数据保存到 SSD 上后，会降低数据的访问性能</a>
+</h3>
+<h2 class="topic">
+<a name="1con2t0bcfhoq414nprd86q5h1">memcache</a>
+</h2>
+<h3 class="topic">
+<a name="5i36ur4jhh22svm9e5otjnutqs">&nbsp;网络模型</a>
+</h3>
+<h3 class="topic">
+<a name="0guvpvk46rb1cppps5aedo3lqb">&nbsp;&nbsp;主线程</a>
+</h3>
+<h3 class="topic">
+<a name="6op03ep18qdqa2b941uloo5p8j">&nbsp;&nbsp;&nbsp;监听端口，当有连接到来，接收该连接，并将连接调度给工作线程</a>
+</h3>
+<h3 class="topic">
+<a name="19p33m97dfiqnflgrt6lu5fsd9">&nbsp;&nbsp;工作线程</a>
+</h3>
+<h3 class="topic">
+<a name="1eb1t723m5g16sjr5arjluk33q">&nbsp;&nbsp;&nbsp;读取数据</a>
+</h3>
+<h3 class="topic">
+<a name="4147lm6gbun0a0d7m31fckqjik">&nbsp;&nbsp;&nbsp;解析命令</a>
+</h3>
+<h3 class="topic">
+<a name="6k7eem13k9d109de6ivsv4ao7t">&nbsp;&nbsp;&nbsp;执行命令</a>
+</h3>
+<h3 class="topic">
+<a name="0fo2b1gnttsdk8q39t6ifl1ogu">&nbsp;&nbsp;&nbsp;写回响应</a>
+</h3>
+<h3 class="topic">
+<a name="3lbqobid3vplmsalcqp7o24cqe">&nbsp;哈希表</a>
+</h3>
+<h3 class="topic">
+<a name="7k4udpdtq08g95ve6g4bmtjprk">&nbsp;&nbsp;快速定位 key，通过链表解决Hash冲突的问题</a>
+</h3>
+<h3 class="topic">
+<a name="7a2si8fr8cv522bh4m87qq3ef8">&nbsp;&nbsp;扩容时，会使用新旧两张哈希表，后台维护线程将旧表的数据迁移到新表。</a>
+</h3>
+<h3 class="topic">
+<a name="3h7ai10hq7np4q6j1e39h29s5e">&nbsp;&nbsp;迁移过程中，根据迁移位置，用户请求会同时查旧表和新的主表</a>
+</h3>
+<h3 class="topic">
+<a name="7j0vlggsn5b2vkc5gapsl7f6hr">&nbsp;分段LRU</a>
+</h3>
+<h3 class="topic">
+<a name="6s0cjgdtda3oojjrfiotq8lgv9">&nbsp;&nbsp;TEMP_LRU</a>
+</h3>
+<h3 class="topic">
+<a name="6rtc08q4uoj74obci62snl217d">&nbsp;&nbsp;&nbsp;配置项:temporary_ttl=N，如果TTL小于或等于这个值，则使用TEMP LRU</a>
+</h3>
+<h3 class="topic">
+<a name="1u8stn2q18sm2pfc3qvivpccri">&nbsp;&nbsp;&nbsp;该列队中的 Item 永远不会发生在队列内搬运，也不会迁移到其他队列</a>
+</h3>
+<h3 class="topic">
+<a name="7os52e8qi5nu4noliv25ossj4t">&nbsp;&nbsp;HOT_LRU</a>
+</h3>
+<h3 class="topic">
+<a name="4cpje3ntgcfvn7rg089700i9o2">&nbsp;&nbsp;&nbsp;对于 HOT LRU，内部不搬运</a>
+</h3>
+<h3 class="topic">
+<a name="5prfqqnk8m1c0hshssovl0abk7">&nbsp;&nbsp;&nbsp;当队列满时，如果队尾Item被访问过，那么会迁移到WARM队列，否则迁移到 COLD 队列。</a>
+</h3>
+<h3 class="topic">
+<a name="652ddlsb0i6vqbme7j7s4o7o2k">&nbsp;&nbsp;WARM_LRU</a>
+</h3>
+<h3 class="topic">
+<a name="59ist35kua6pgiv0764sc2qi4m">&nbsp;&nbsp;&nbsp;如果队列的 Item 被再次访问，就搬到队首，否则迁移到 COLD 队列</a>
+</h3>
+<h3 class="topic">
+<a name="1tm7l1dnm71gug5bes8b4o41p5">&nbsp;&nbsp;COLD_LRU</a>
+</h3>
+<h3 class="topic">
+<a name="5qrg19dvv24la8rt17egmm55mv">&nbsp;&nbsp;&nbsp;存放的是最不活跃的Item，一旦内存满了，队尾的Item会被剔除。</a>
+</h3>
+<h3 class="topic">
+<a name="4tgnn0g3hvdsn6honnb8i8njfl">&nbsp;&nbsp;&nbsp;如果COLD LRU里的Item被再次访问，会迁移到WARM LRU</a>
+</h3>
+<h3 class="topic">
+<a name="6fcfausoktk88m3ssp7t9i6ns9">&nbsp;slab分配机制</a>
+</h3>
+<h3 class="topic">
+<a name="32i53ggp97lduolq9pvsmm6jnh">&nbsp;&nbsp;避免内存碎片越来越多，减轻系统内存管理器的负担</a>
+</h3>
+<h3 class="topic">
+<a name="2kdptcnusqa2o67o2lkhnur9mv">&nbsp;&nbsp;根据需要不断分配默认大小为 1MB 的 slab，每个 slab 又被分为相同大小的 chunk。</a>
+</h3>
+<h3 class="topic">
+<a name="1adq3m3ij11lrllv0vls30qr5b">&nbsp;&nbsp;默认创建64 个slabclass，slabclass会按照增长因子逐步增大chunk size，具体数值会进一步对8取整。默认的增长因子是 1.25，启动时可以通过 -f 将增长因子设为其他值</a>
+</h3>
+<h3 class="topic">
+<a name="40s750lkhqishs49llroulj0l5">&nbsp;&nbsp;存储数据时会选择最接近的slabclass，所以chunk浪费的字节非常有限</a>
+</h3>
+<h3 class="topic">
+<a name="0akfifnv2r3nvgjhbj2tkq1gtd">&nbsp;应用</a>
+</h3>
+<h3 class="topic">
+<a name="5li8ckc7o24uhqk9qo7j6obgnf">&nbsp;&nbsp;分拆缓存池</a>
+</h3>
+<h3 class="topic">
+<a name="3o4dig4cass8nk2fuij5odk8ul">&nbsp;&nbsp;&nbsp;根据业务将数据分拆到独立Mc资源池</a>
+</h3>
+<h3 class="topic">
+<a name="0iv1rep27144j7bidqb6m7q4ad">&nbsp;&nbsp;&nbsp;在每个资源池采用合适的分布算法</a>
+</h3>
+<h3 class="topic">
+<a name="724coqie6rkf7cqd5aj1ummlml">&nbsp;&nbsp;Master-Slave 两级架构</a>
+</h3>
+<h3 class="topic">
+<a name="00rbr7cs0aofvn83d0pj9cmpbu">&nbsp;&nbsp;&nbsp; master节点异常后，由slave来承接外部请求</a>
+</h3>
+<h3 class="topic">
+<a name="6j83jh38ccd4bouc6d4nimia4b">&nbsp;&nbsp;&nbsp;分布方式可以采用哈希取模方案，可以避免一致性hash在rehash后产生的脏数据问题</a>
+</h3>
+<h3 class="topic">
+<a name="6plmgedtcfinmbf1tsk46cgfpp">&nbsp;&nbsp;M-S-L1 架构</a>
+</h3>
+<h3 class="topic">
+<a name="3bkact33810u51ncbfvah2aj9r">&nbsp;&nbsp;&nbsp;80% 的请求会集中在 20% 的数据上</a>
+</h3>
+<h3 class="topic">
+<a name="5mgq722ba15s2i4d8ld48imrcp">&nbsp;&nbsp;&nbsp;L1层应对热数据的访问</a>
+</h3>
+<h2 class="topic">
+<a name="4nksq9sv5k6po4idc0ctn2k5s8">缓存相关的问题</a>
+</h2>
+<h3 class="topic">
+<a name="1in168gffiueqrj9d1sd06ldbo">&nbsp;数据倾斜</a>
+</h3>
+<h3 class="topic">
+<a name="4e52h0qf6nj3dka3jdt9mu2ebb">&nbsp;&nbsp;数据量倾斜</a>
+</h3>
+<h3 class="topic">
+<a name="36a0chs1nq0gkii771o16l39l6">&nbsp;&nbsp;&nbsp;存在BigKey</a>
+</h3>
+<h3 class="topic">
+<a name="1h2ioon0koimvfpebncsjb0hoh">&nbsp;&nbsp;&nbsp;&nbsp;避免创建Bigkey</a>
+</h3>
+<h3 class="topic">
+<a name="7c10p5aqfah6m14ov19ivo551f">&nbsp;&nbsp;&nbsp;&nbsp;集合类型的拆分为多个小集合，分散存储</a>
+</h3>
+<h3 class="topic">
+<a name="0si32tnt566n9i3icng4pbn7m5">&nbsp;&nbsp;&nbsp;Slot分配不均</a>
+</h3>
+<h3 class="topic">
+<a name="0j60a35llht4m2dc228g333h59">&nbsp;&nbsp;&nbsp;&nbsp;避免把过多slot分配到一个实例上</a>
+</h3>
+<h3 class="topic">
+<a name="3hlit6er13goq8i91kh5ugcphe">&nbsp;&nbsp;&nbsp;&nbsp;监控每个实例维护的slot，维护的slot过多进行数据迁移</a>
+</h3>
+<h3 class="topic">
+<a name="7dkbcp4ch051tnurvf3ckou85c">&nbsp;&nbsp;&nbsp;使用HashTag导致数据倾斜</a>
+</h3>
+<h3 class="topic">
+<a name="2lm1tsmu9jj47qur80df2on0mr">&nbsp;&nbsp;&nbsp;&nbsp;Hash Tag 是指加在键值对 key 中的一对花括号{}，客户端在计算 key 的 CRC16 值时，只对 Hash Tag 花括号中的 key 内容进行计算。如果没用 Hash Tag 的话，客户端计算整个 key 的 CRC16 的值</a>
+</h3>
+<h3 class="topic">
+<a name="3her59hnb32pu33rvldcfa3a5d">&nbsp;&nbsp;数据访问倾斜</a>
+</h3>
+<h3 class="topic">
+<a name="6u6jea73u7h3dl224u1fu71811">&nbsp;&nbsp;&nbsp;存在热点数据</a>
+</h3>
+<h3 class="topic">
+<a name="3ir72aa46rgj8507aa8hoavgpu">&nbsp;&nbsp;&nbsp;采用带有不同前缀的多副本方法</a>
+</h3>
+<h3 class="topic">
+<a name="3fc3940716rqumvhmq30du0bav">&nbsp;Hot Key（读热点）</a>
+</h3>
+<h3 class="topic">
+<a name="4963tjhf2rn5gn99k4onrjgbl2">&nbsp;&nbsp;问题描述</a>
+</h3>
+<h3 class="topic">
+<a name="57d7nkdd7rbrahiobtb3q64uhf">&nbsp;&nbsp;&nbsp;突发的热门事件，特定的Key所在的cache节点服务过载，卡顿</a>
+</h3>
+<h3 class="topic">
+<a name="7brckisfon29gac4onrb1iut38">&nbsp;&nbsp;&nbsp;预估相关的key，借助大数据离线批处理（Hadoop）、实时计算（Storm、SparkStreaming）统计热点key</a>
+</h3>
+<h3 class="topic">
+<a name="7gt9ld1v9c8aitocs843o5hd6o">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="2is7jrsb2gd9o1bu8nasr9p6ef">&nbsp;&nbsp;&nbsp;热点key分散：hotkey#1，hotkey#2 ...hotket#n</a>
+</h3>
+<h3 class="topic">
+<a name="3if0eia5gfbvrqhcq5847cjf4o">&nbsp;&nbsp;&nbsp;相同key分散，多级缓存，多slave；避免相同的热点数据访问相同的cache节点</a>
+</h3>
+<h3 class="topic">
+<a name="3qj3ef5imctuop5dg3pe4p67re">&nbsp;&nbsp;&nbsp;业务端本地缓存记录热点数据、nginx缓存（需要注意缓存一致性的问题）</a>
+</h3>
+<h3 class="topic">
+<a name="6crchflegbr0tcr4hcaf91f9d7">&nbsp;写热点</a>
+</h3>
+<h3 class="topic">
+<a name="59s2fphn3dp5kdc2olcb52ffhb">&nbsp;&nbsp;例如秒杀场景下对库存的频繁修改</a>
+</h3>
+<h3 class="topic">
+<a name="6orm859nmoh71qblu3ruemln36">&nbsp;&nbsp;合并写</a>
+</h3>
+<h3 class="topic">
+<a name="45hmnaopqbb8e8uqhe308m5o61">&nbsp;&nbsp;并行写变串行写，将写请求存放到redis队列或者消息中间件，开启消费线程进行处理</a>
+</h3>
+<h3 class="topic">
+<a name="4uiga3u3k2quh55ds4rlfk1tdl">&nbsp;Big Key</a>
+</h3>
+<h3 class="topic">
+<a name="55ct7dn4op8geh7i545p37sgbk">&nbsp;&nbsp;问题描述</a>
+</h3>
+<h3 class="topic">
+<a name="57mg09qqmrv8h10k75mm400upf">&nbsp;&nbsp;&nbsp;部分key的value过大，读写、加载容易超时；如果value过大的key被频繁访问带宽网卡容易被打满</a>
+</h3>
+<h3 class="topic">
+<a name="0oi0eaddkrie6379k53v7qs96k">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="04amntr8t0ldffucdoc91nsabf">&nbsp;&nbsp;&nbsp;1、拆分为多个小key</a>
+</h3>
+<h3 class="topic">
+<a name="4s19r495jjhh3r0dke2nb4ft1u">&nbsp;&nbsp;&nbsp;2、尽量避免过期或删除</a>
+</h3>
+<h3 class="topic">
+<a name="7g3k1h99ghqbvq3b1i4rf2vvkg">&nbsp;&nbsp;&nbsp;3、对于memcache，设置缓存阈值，超过启用压缩</a>
+</h3>
+<h3 class="topic">
+<a name="7tefftii9fbugupj5eqvhn48va">&nbsp;&nbsp;&nbsp;4、对于redis，client端进行序列化，restore一次写入</a>
+</h3>
+<h3 class="topic">
+<a name="7a2se7ukk3klglecvpmqtandvc">&nbsp;缓存穿透</a>
+</h3>
+<h3 class="topic">
+<a name="4e15d6g6id6c96telq9n9ecjrt">&nbsp;&nbsp;问题描述</a>
+</h3>
+<h3 class="topic">
+<a name="1lu2gldvc9qplumta2k76hdikf">&nbsp;&nbsp;&nbsp;查询一个不存在的key，每次访问都穿刺到DB，对DB造成压力</a>
+</h3>
+<h3 class="topic">
+<a name="54mmujc24en4s5sruklt9bsviu">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="2p9lhafs7jsejgi28lkcge60hv">&nbsp;&nbsp;&nbsp;1、不存在的key，在缓存中设置默认值</a>
+</h3>
+<h3 class="topic">
+<a name="0m5ic3sh8oopdgoaodvpjptbef">&nbsp;&nbsp;&nbsp;2、构建BloomFilter过滤器，过滤非法的key</a>
+</h3>
+<h3 class="topic">
+<a name="506eqt1pkj4hus37j1mp9dstb8">&nbsp;&nbsp;&nbsp;3、规范key的格式，对于不符合一定规则的key操作进行过滤</a>
+</h3>
+<h3 class="topic">
+<a name="642ohofdr93hbmif0qjnk2psnl">&nbsp;缓存雪崩</a>
+</h3>
+<h3 class="topic">
+<a name="4qf5cgv4er9v3gfjvra4a91397">&nbsp;&nbsp;问题描述</a>
+</h3>
+<h3 class="topic">
+<a name="0da8hr6ugqqtcopki1ts0tf8ff">&nbsp;&nbsp;&nbsp;缓存实例宕机，导致大量查询请求积压到数据库</a>
+</h3>
+<h3 class="topic">
+<a name="4q9itqc5a6hvl36s5jp2lugm0u">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="2n771iumrf2m02snf1oapueesk">&nbsp;&nbsp;&nbsp;同一时刻大量缓存到期，量请求发送到数据库层，导致数据库层的压力激增</a>
+</h3>
+<h3 class="topic">
+<a name="1monbab2sic8fo4vogihp3us3g">&nbsp;&nbsp;&nbsp;多副本cache架构，任何cache池miss后，读其他cache副本</a>
+</h3>
+<h3 class="topic">
+<a name="4a0et64ntsr0e2sv9ff97us3qm">&nbsp;&nbsp;&nbsp;不同的key，设置不同的过期时间，让缓存失效的时间点尽量均匀。</a>
+</h3>
+<h3 class="topic">
+<a name="6ahckfj06es3np76bjopaq22st">&nbsp;&nbsp;&nbsp;某个key只允许一个线程查询数据库，其他线程等待。可通过分布式锁实现，如果服务实例不是太多，也可以通过单机锁实现</a>
+</h3>
+<h3 class="topic">
+<a name="4l5t9esekn7du0v18rsbvn9mg2">&nbsp;&nbsp;&nbsp;访问数据层之前，进行限流</a>
+</h3>
+<h3 class="topic">
+<a name="7mhhf7espg433uk0ktqpb6u92f">&nbsp;&nbsp;&nbsp;对于慢请求进行熔断</a>
+</h3>
+<h3 class="topic">
+<a name="7800gq5mepdg0nb2bcp0ugfkmd">&nbsp;&nbsp;&nbsp;多级缓存，nginx缓存-&gt;本地缓存-&gt;reids缓存</a>
+</h3>
+<h3 class="topic">
+<a name="0snqtdkmm2po170g6seg5krf3r">&nbsp;缓存击穿</a>
+</h3>
+<h3 class="topic">
+<a name="7p1e0vfmbk333qo0c2gdd8hnh2">&nbsp;&nbsp;问题描述</a>
+</h3>
+<h3 class="topic">
+<a name="73u5cia7es8knf2fra40f5v8qf">&nbsp;&nbsp;&nbsp;热点的key同时过期，缓存未命中，穿透到数据库，数据库压力大增，导致查询变慢</a>
+</h3>
+<h3 class="topic">
+<a name="5vq8ggi38i51a23u2np3sdjt1v">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="5nnj8c46jekbmpo45go76dilrv">&nbsp;&nbsp;&nbsp;每个key设置一个基础的时间+随机的过期时间，防止同一时间大量的key过期</a>
+</h3>
+<h3 class="topic">
+<a name="1qe4vcrus60m5edilgbm8d5k3m">&nbsp;&nbsp;多线程进行查询，可以给第一个请求加互斥锁然后其他请求排队等待；使用redis的setnx互斥锁先进行判断</a>
+</h3>
+<h3 class="topic">
+<a name="26d78db80rlij8earskhjtvm44">&nbsp;数据一致性问题</a>
+</h3>
+<h3 class="topic">
+<a name="79b56vko0np6m34v46enn871q6">&nbsp;&nbsp;问题描述</a>
+</h3>
+<h3 class="topic">
+<a name="04vn2o8t15iki2ij38pfaat1ho">&nbsp;&nbsp;&nbsp;cache中的数据和DB中的不一致</a>
+</h3>
+<h3 class="topic">
+<a name="589iis8jp4rl5dtm7hnc724qnr">&nbsp;&nbsp;&nbsp;一致性hash算法,在节点多次上下线以后，也会产生脏数据</a>
+</h3>
+<h3 class="topic">
+<a name="2i48tmda47vl4dv4h5n2od3aph">&nbsp;&nbsp;解决方案</a>
+</h3>
+<h3 class="topic">
+<a name="3tbu1e0tnvsf2un2kjar55fvqi">&nbsp;&nbsp;&nbsp;先修改数据库，再删除缓存。</a>
+</h3>
+<h3 class="topic">
+<a name="1npjuij5lu1rmi4j2g4lntqqi4">&nbsp;&nbsp;&nbsp;数据实时同步失效</a>
+</h3>
+<h3 class="topic">
+<a name="7dnm8rskbchshkb6viunn80jsi">&nbsp;&nbsp;&nbsp;&nbsp;修改数据时，同时淘汰缓存中的数据。读请求，更新缓存。为避免缓存雪崩，更新缓存的过程需要进行同步控制，同一时间允许一个请求访问数据库</a>
+</h3>
+<h3 class="topic">
+<a name="5h7j9hh603o16bfqgkilibrpsl">&nbsp;&nbsp;&nbsp;数据准实时性更新</a>
+</h3>
+<h3 class="topic">
+<a name="038j1oark28eugp21967e12edu">&nbsp;&nbsp;&nbsp;&nbsp;更新数据库后，异步更新缓存。使用MQ+Cannl实现</a>
+</h3>
+<h2 class="topic">
+<a name="4n5cdrfp21pp8va6r446vsj157">监控</a>
+</h2>
+<h3 class="topic">
+<a name="27ugk1rldpjvkq4ef00laa3k38">&nbsp;缓存命中率</a>
+</h3>
+<h3 class="topic">
+<a name="0lg29ftmrtvg68bfn17gqmg9ic">&nbsp;缓存使用率</a>
+</h3>
+<h3 class="topic">
+<a name="3ndhumt87l5fabmo7otrpans91">&nbsp;慢日志</a>
+</h3>
+<h3 class="topic">
+<a name="2m2cg48n2hkj3id8h51ebv8ust">&nbsp;延迟</a>
+</h3>
+<h3 class="topic">
+<a name="052t5khg2o91q87fpubsoohmrh">&nbsp;客户端连接数</a>
+</h3>
+</body>
+</html>
