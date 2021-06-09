@@ -1100,6 +1100,8 @@ private void notifyChange(Acceptor acceptor) {
 }
 ```
 
+
+
 ## 注册服务
 
 com.alipay.sofa.registry.server.data.remoting.sessionserver.handler.PublishDataHandler#doHandle
@@ -1391,7 +1393,11 @@ public void onResponse(Object obj) {//同步数据的回调
 
 **1.任何问题都可以通过加一中间层来解决**
 
-2.优化服务发布方频繁变更。每个服务推送前进行一定延迟等待，等待一定时间后进行一次推送
+2.增加了中间层SessionServer，可支持海量的客户端
+
+3.优化服务发布方频繁变更。每个服务推送前进行一定延迟等待，等待一定时间后进行一次推送，借助延迟队列实现
+
+4、推送任务比较大的时候会进行队列缓冲，以服务ID和推送方IP为粒度，对推送任务为合并
 
 
 
