@@ -77,14 +77,13 @@ protected synchronized long nextId() {
         if (sequence == 0) {
             currentSecond = getNextSecond(lastSecond);
         }
-		//时间不同，sequence从0开始递增；在并发不大的场景下，每秒生成的sequence的值都是0，导致数据倾斜
+		//时间不同，sequence从0开始递增；极端场景下每秒只生成1个id，每个id的sequence的值都是0，容易导致数据倾斜
     } else {
-        sequence = 0L;
+        sequence = 0L;//初始值可以设置为一个随机数
     }
 	 
     lastSecond = currentSecond;
 		//生成UID
-    // Allocate bits for UID
     return bitsAllocator.allocate(currentSecond - epochSeconds, workerId, sequence);
 }
 ```
@@ -92,7 +91,7 @@ protected synchronized long nextId() {
 com.baidu.fsg.uid.impl.DefaultUidGenerator#getCurrentSecond
 
 ```java
-private long getCurrentSecond() {
+private long getCurrentSecond() { //获取当前时间
     long currentSecond = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis());
     if (currentSecond - epochSeconds > bitsAllocator.getMaxDeltaSeconds()) { //判断是否耗尽
         throw new UidGenerateException("Timestamp bits is exhausted. Refusing UID generate. Now: " + currentSecond);
@@ -105,7 +104,7 @@ private long getCurrentSecond() {
 com.baidu.fsg.uid.BitsAllocator#allocate
 
 ```java
-public long allocate(long deltaSeconds, long workerId, long sequence) {
+public long allocate(long deltaSeconds, long workerId, long sequence) { //拼接Id
     return (deltaSeconds << timestampShift) | (workerId << workerIdShift) | sequence;
 }
 ```
@@ -209,7 +208,7 @@ protected List<Long> nextIdsForOneSecond(long currentSecond) {
     int listSize = (int) bitsAllocator.getMaxSequence() + 1;
     List<Long> uidList = new ArrayList<>(listSize);
 
-    // Allocate the first sequence of the second, the others can be calculated with the offset
+    // 生成当前秒的第一个Id
     long firstSeqUid = bitsAllocator.allocate(currentSecond - epochSeconds, workerId, 0L);
     for (int offset = 0; offset < listSize; offset++) {
         uidList.add(firstSeqUid + offset);
@@ -238,7 +237,7 @@ public synchronized boolean put(long uid) {
     // 1. pre-check whether the flag is CAN_PUT_FLAG
     int nextTailIndex = calSlotIndex(currentTail + 1); //下一个填充的位置
     if (flags[nextTailIndex].get() != CAN_PUT_FLAG) {//是否可以填充
-        rejectedPutHandler.rejectPutBuffer(this, uid); //决绝填充
+        rejectedPutHandler.rejectPutBuffer(this, uid); //拒绝填充
         return false;
     }
 
@@ -287,13 +286,13 @@ public long take() {
                 nextCursor, currentTail - nextCursor);
         bufferPaddingExecutor.asyncPadding();
     }
-		//消费位置等于填充的位置，没有有效的UID可以获取
+		//消费位置等于填充的位置，没有有效的UID可以获取，抛出异常
     if (nextCursor == currentCursor) {
         rejectedTakeHandler.rejectTakeBuffer(this);
     }
 
     // 1. check next slot flag is CAN_TAKE_FLAG
-    int nextCursorIndex = calSlotIndex(nextCursor); //计算ringbuffer获取UID的位置
+    int nextCursorIndex = calSlotIndex(nextCursor); //根据nextCursor计算所属的数据下标
     Assert.isTrue(flags[nextCursorIndex].get() == CAN_TAKE_FLAG, "Curosr not in can take status"); //当前的标志必须为可以CAN_TAKE_FLAG，才可以获取UID
 
     // 2. get UID from next slot
@@ -309,9 +308,9 @@ public long take() {
 
 # 总结
 
-1、缓存行填充，消除伪共享
+1、对频繁修改的共享变量进行缓存行填充，消除伪共享，避免了对共享数据的修改导致处于同一缓存行上的数据失效
 
 2、环形数组，由于数组元素在内存中是连续分配的，可最大程度利用CPU cache以提升性能
 
-3、每隔一秒对RingBuffer进行填充，当可用的UID小于数组的长度一半的时候进行异步填充
+3、当可用的UID小于数组的长度一半的时候进行异步填充
 
