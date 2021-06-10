@@ -312,7 +312,7 @@ com.alipay.remoting.rpc.RpcHandler#channelRead
 
 ```java
 public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-    //解码时已设置ProtocolCode
+    //解码时设置ProtocolCode
     ProtocolCode protocolCode = ctx.channel().attr(Connection.PROTOCOL).get();
     //获取Protocol
     Protocol protocol = ProtocolManager.getProtocol(protocolCode);
@@ -607,7 +607,6 @@ public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
     ByteBuf buf = null;
     try {
         if (acceptOutboundMessage(msg)) {
-            @SuppressWarnings("unchecked")
             I cast = (I) msg;
             //分配bytebuf，默认堆外内存
             buf = allocateBuffer(ctx, cast, preferDirect);
@@ -661,7 +660,9 @@ protected void encode(ChannelHandlerContext ctx, Serializable msg, ByteBuf out)
 
 # 支持的3种请求方式
 
-## 发送oneway请求，不关心返回结果
+## oneway请求
+
+不关心返回结果，发送失败打印错误信息
 
 com.alipay.remoting.BaseRemoting#oneway
 
@@ -672,7 +673,7 @@ protected void oneway(final Connection conn, final RemotingCommand request) {
 
             @Override
             public void operationComplete(ChannelFuture f) throws Exception {
-                if (!f.isSuccess()) {
+                if (!f.isSuccess()) { //发送失败
                     logger.error("Invoke send failed. The address is {}",
                         RemotingUtil.parseRemoteAddress(conn.getChannel()), f.cause());
                 }
@@ -690,7 +691,9 @@ protected void oneway(final Connection conn, final RemotingCommand request) {
 }
 ```
 
-## 同步发送请求
+## 同步请求
+
+阻塞，直到接收服务端的响应结果
 
 com.alipay.remoting.BaseRemoting#invokeSync
 
@@ -698,6 +701,7 @@ com.alipay.remoting.BaseRemoting#invokeSync
 protected RemotingCommand invokeSync(final Connection conn, final RemotingCommand request,
                                      final int timeoutMillis) throws RemotingException,
                                                              InterruptedException {
+    //创建InvokeFuture                                                           
     final InvokeFuture future = createInvokeFuture(request, request.getInvokeContext());
     conn.addInvokeFuture(future);
     final int requestId = request.getId();
@@ -706,9 +710,9 @@ protected RemotingCommand invokeSync(final Connection conn, final RemotingComman
             @Override
             public void operationComplete(ChannelFuture f) throws Exception {
                 if (!f.isSuccess()) {
-                    conn.removeInvokeFuture(requestId);
+                    conn.removeInvokeFuture(requestId);//移除future
                     future.putResponse(commandFactory.createSendFailedResponse(
-                        conn.getRemoteAddress(), f.cause()));
+                        conn.getRemoteAddress(), f.cause())); //唤醒
                     logger.error("Invoke send failed, id={}", requestId, f.cause());
                 }
             }
@@ -771,7 +775,7 @@ protected InvokeFuture invokeWithFuture(final Connection conn, final RemotingCom
 
         });
     } catch (Exception e) {
-        //异常，日出Future
+        //异常，移除Future
         InvokeFuture f = conn.removeInvokeFuture(requestId);
         if (f != null) {
             f.cancelTimeout(); //取消定时事件
@@ -784,15 +788,15 @@ protected InvokeFuture invokeWithFuture(final Connection conn, final RemotingCom
 }
 ```
 
-处理接收的响应
+# 处理接收的响应
 
 com.alipay.remoting.rpc.protocol.RpcResponseProcessor#doProcess
 
 ```java
 public void doProcess(RemotingContext ctx, RemotingCommand cmd) {
-		//获取对应的Connection
+		//获取Channel的Connection对象
     Connection conn = ctx.getChannelContext().channel().attr(Connection.CONNECTION).get();
-  //根据请求ID从Connection获取InvokeFuture
+  //根据请求Id从Connection获取InvokeFuture
     InvokeFuture future = conn.removeInvokeFuture(cmd.getId());
     ClassLoader oldClassLoader = null;
     try {
@@ -803,10 +807,10 @@ public void doProcess(RemotingContext ctx, RemotingCommand cmd) {
             }
            //填充响应
             future.putResponse(cmd);
-          //删除事件
+          //从时间轮删除定时事件
             future.cancelTimeout();
             try {
-                future.executeInvokeCallback();
+                future.executeInvokeCallback(); //执行回调
             } catch (Exception e) {
                 logger.error("Exception caught when executing invoke callback, id={}",
                     cmd.getId(), e);
@@ -831,7 +835,7 @@ public void doProcess(RemotingContext ctx, RemotingCommand cmd) {
 
 2、快速失败，服务端解码成功之后记录一个到达时间，当开始进行请求处理的时候，计算当前时间与到达时间的差值超过请求的超时时间，将此请求丢弃。在RPC框架中，还会记录请求开始时间和请求执行完毕的时间，统计请求排队的时间和请求处理的时间。请求执行完毕，计算当前时间与到达时间的差值，如果超过超时时间，将此请求丢弃
 
-3、解码器对Netty的解码器进行了优化，将解码出的业务对象，组装成List，批量提交给ChannelPipiline处理
+3、批量优化。对Netty的解码器进行了优化，将解码出的业务对象，组装成List，批量提交给ChannelPipiline处理
 
 4、灵活配置业务请求是在IO线程中处理还是由业务线程池处理
 
