@@ -37,6 +37,15 @@
     * [计算累积的数据量](#计算累积的数据量)
     * [超过高水位线设置不可写](#超过高水位线设置不可写)
   * [Flush](#flush)
+* [NioEventLoop](#nioeventloop)
+  * [优化SelectorImpl](#优化selectorimpl)
+  * [selector自动重建](#selector自动重建)
+  * [创建任务队列](#创建任务队列)
+  * [ioRatio](#ioratio)
+  * [事件处理](#事件处理)
+    * [计算策略](#计算策略)
+    * [处理IO事件](#处理io事件)
+    * [处理非IO任务](#处理非io任务)
 * [FlushConsolidationHandler](#flushconsolidationhandler)
 * [流量整形](#流量整形)
   * [Channel级别](#channel级别)
@@ -53,10 +62,11 @@
 * [HashedWheelTimer](#hashedwheeltimer)
   * [初始化](#初始化-2)
   * [添加任务](#添加任务)
-    * [启动工作线程](#启动工作线程)
+  * [删除任务](#删除任务)
+  * [启动工作线程](#启动工作线程)
   * [工作线程运行流程](#工作线程运行流程)
-    * [移除被取消的任务](#移除被取消的任务)
-    * [从队列取任务加入到时间轮](#从队列取任务加入到时间轮)
+    * [移除被删除的任务](#移除被删除的任务)
+    * [添加任务到时间轮](#添加任务到时间轮)
     * [执行过期任务](#执行过期任务)
 * [Recycler](#recycler)
   * [对象的获取](#对象的获取)
@@ -71,8 +81,10 @@
     * [客户端](#客户端)
     * [服务端](#服务端)
   * [解码](#解码)
+* [解码器](#解码器)
+  * [FixedLengthFrameDecoder](#fixedlengthframedecoder)
+  * [DelimiterBasedFrameDecoder](#delimiterbasedframedecoder)
 * [总结](#总结)
-
 
 
 # 服务端初始化
@@ -1586,6 +1598,606 @@ public boolean remove() {
 }
 ```
 
+# NioEventLoop
+
+## 优化SelectorImpl
+
+```java
+//是否对SelectorImpl的属性selectedKeys、publicKeys使用的数据结构进行优化，默认false进行优化
+private static final boolean DISABLE_KEY_SET_OPTIMIZATION =
+        SystemPropertyUtil.getBoolean("io.netty.noKeySetOptimization", false);
+```
+
+io.netty.channel.nio.NioEventLoop#openSelector
+
+```java
+private SelectorTuple openSelector() {
+    final Selector unwrappedSelector;
+    try {
+        unwrappedSelector = provider.openSelector();
+    } catch (IOException e) {
+        throw new ChannelException("failed to open a new selector", e);
+    }
+
+    if (DISABLE_KEY_SET_OPTIMIZATION) { //不进行优化
+        return new SelectorTuple(unwrappedSelector);
+    }
+		//获取SelectorImpl对象
+    Object maybeSelectorImplClass = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+        @Override
+        public Object run() {
+            try {
+                return Class.forName(
+                        "sun.nio.ch.SelectorImpl",
+                        false,
+                        PlatformDependent.getSystemClassLoader());
+            } catch (Throwable cause) {
+                return cause;
+            }
+        }
+    });
+	
+   
+    if (!(maybeSelectorImplClass instanceof Class) ||
+        // ensure the current selector implementation is what we can instrument.
+        !((Class<?>) maybeSelectorImplClass).isAssignableFrom(unwrappedSelector.getClass())) {
+        if (maybeSelectorImplClass instanceof Throwable) {
+            Throwable t = (Throwable) maybeSelectorImplClass;
+            logger.trace("failed to instrument a special java.util.Set into: {}", unwrappedSelector, t);
+        }
+        return new SelectorTuple(unwrappedSelector);
+    }
+
+    final Class<?> selectorImplClass = (Class<?>) maybeSelectorImplClass;
+  
+  	//替换的实现类，内部通过数组存储SelectionKey对象
+    final SelectedSelectionKeySet selectedKeySet = new SelectedSelectionKeySet();
+
+    Object maybeException = AccessController.doPrivileged(new PrivilegedAction<Object>() {
+        @Override
+        public Object run() {
+            try {
+              	//通过反射获取属性，类型都是Set，底层通过HashMap实现
+                Field selectedKeysField = selectorImplClass.getDeclaredField("selectedKeys");
+              
+                Field publicSelectedKeysField = selectorImplClass.getDeclaredField("publicSelectedKeys");
+
+                if (PlatformDependent.javaVersion() >= 9 && PlatformDependent.hasUnsafe()) {
+                    // Let us try to use sun.misc.Unsafe to replace the SelectionKeySet.
+                    // This allows us to also do this in Java9+ without any extra flags.
+                  	//通过unsafe替换属性的实现，获取属性的偏移量
+                    long selectedKeysFieldOffset = PlatformDependent.objectFieldOffset(selectedKeysField);
+                    long publicSelectedKeysFieldOffset =
+                            PlatformDependent.objectFieldOffset(publicSelectedKeysField);
+										//selectedKeys、publicKeys都能找到
+                    if (selectedKeysFieldOffset != -1 && publicSelectedKeysFieldOffset != -1) {										//开始替换
+                        PlatformDependent.putObject(
+                                unwrappedSelector, selectedKeysFieldOffset, selectedKeySet);
+                        PlatformDependent.putObject(
+                                unwrappedSelector, publicSelectedKeysFieldOffset, selectedKeySet);
+                        return null;
+                    }
+                    // We could not retrieve the offset, lets try reflection as last-resort.
+                }
+								//通过反射替换成新的实现
+                Throwable cause = ReflectionUtil.trySetAccessible(selectedKeysField, true);
+                if (cause != null) {
+                    return cause;
+                }
+                cause = ReflectionUtil.trySetAccessible(publicSelectedKeysField, true);
+                if (cause != null) {
+                    return cause;
+                }
+
+                selectedKeysField.set(unwrappedSelector, selectedKeySet);
+                publicSelectedKeysField.set(unwrappedSelector, selectedKeySet);
+                return null;
+            } catch (NoSuchFieldException e) {
+                return e;
+            } catch (IllegalAccessException e) {
+                return e;
+            }
+        }
+    });
+
+    if (maybeException instanceof Exception) {
+        selectedKeys = null;
+        Exception e = (Exception) maybeException;
+        logger.trace("failed to instrument a special java.util.Set into: {}", unwrappedSelector, e);
+        return new SelectorTuple(unwrappedSelector);
+    }
+    selectedKeys = selectedKeySet;
+    logger.trace("instrumented a special java.util.Set into: {}", unwrappedSelector);
+    return new SelectorTuple(unwrappedSelector,
+                             new SelectedSelectionKeySetSelector(unwrappedSelector, selectedKeySet));
+}
+```
+
+
+
+## selector自动重建
+
+```java
+private static final int MIN_PREMATURE_SELECTOR_RETURNS = 3; 
+private static final int SELECTOR_AUTO_REBUILD_THRESHOLD;
+```
+
+```java
+int selectorAutoRebuildThreshold = SystemPropertyUtil.getInt("io.netty.selectorAutoRebuildThreshold", 512); //默认512，空轮询超过此值，自动重建Selector
+if (selectorAutoRebuildThreshold < MIN_PREMATURE_SELECTOR_RETURNS) {
+    selectorAutoRebuildThreshold = 0;
+}
+
+SELECTOR_AUTO_REBUILD_THRESHOLD = selectorAutoRebuildThreshold;
+```
+
+io.netty.channel.nio.NioEventLoop#selectRebuildSelector
+
+```java
+private Selector selectRebuildSelector(int selectCnt) throws IOException {//开始重建
+    logger.warn(
+            "Selector.select() returned prematurely {} times in a row; rebuilding Selector {}.",
+            selectCnt, selector);
+
+    rebuildSelector(); //重建
+    Selector selector = this.selector;
+
+    // Select again to populate selectedKeys.
+    selector.selectNow();
+    return selector;
+}
+```
+
+io.netty.channel.nio.NioEventLoop#rebuildSelector
+
+```java
+public void rebuildSelector() {
+    if (!inEventLoop()) { //如果是其他线程发起的rebuildSelector，将rebuildSelector封装成Task，放到taskQueue中
+        execute(new Runnable() {
+            @Override
+            public void run() {
+                rebuildSelector0();
+            }
+        });
+        return;
+    }
+    rebuildSelector0();
+}
+```
+
+```java
+private void rebuildSelector0() {
+    final Selector oldSelector = selector;
+    final SelectorTuple newSelectorTuple;
+
+    if (oldSelector == null) {
+        return;
+    }
+
+    try {
+        //创建新的Seclector
+        newSelectorTuple = openSelector(); 
+    } catch (Exception e) {
+        logger.warn("Failed to create a new Selector.", e);
+        return;
+    }
+
+  	//注册所有的channnel到新的Selector
+    // Register all channels to the new Selector.
+    int nChannels = 0;
+    for (SelectionKey key: oldSelector.keys()) {
+        Object a = key.attachment();
+        try {
+            if (!key.isValid() || key.channel().keyFor(newSelectorTuple.unwrappedSelector) != null) {
+                continue;
+            }
+
+            int interestOps = key.interestOps();
+            key.cancel();
+            SelectionKey newKey = key.channel().register(newSelectorTuple.unwrappedSelector, interestOps, a);
+            if (a instanceof AbstractNioChannel) {
+                // Update SelectionKey
+                ((AbstractNioChannel) a).selectionKey = newKey;
+            }
+            nChannels ++;
+        } catch (Exception e) {
+            logger.warn("Failed to re-register a Channel to the new Selector.", e);
+            if (a instanceof AbstractNioChannel) {
+                AbstractNioChannel ch = (AbstractNioChannel) a;
+                ch.unsafe().close(ch.unsafe().voidPromise());
+            } else {
+                @SuppressWarnings("unchecked")
+                NioTask<SelectableChannel> task = (NioTask<SelectableChannel>) a;
+                invokeChannelUnregistered(task, key, e);
+            }
+        }
+    }
+
+    selector = newSelectorTuple.selector;
+    unwrappedSelector = newSelectorTuple.unwrappedSelector;
+
+    try {
+        oldSelector.close(); //关闭旧的Selector
+    } catch (Throwable t) {
+        if (logger.isWarnEnabled()) {
+            logger.warn("Failed to close the old Selector.", t);
+        }
+    }
+
+    if (logger.isInfoEnabled()) {
+        logger.info("Migrated " + nChannels + " channel(s) to the new Selector.");
+    }
+}
+```
+
+
+
+## 创建任务队列
+
+io.netty.channel.nio.NioEventLoop#newTaskQueue(io.netty.channel.EventLoopTaskQueueFactory)
+
+```java
+private static Queue<Runnable> newTaskQueue(
+        EventLoopTaskQueueFactory queueFactory) {
+    if (queueFactory == null) {//使用JCTools下的集合类，针对不同的生产消费场景进行了优化
+        return newTaskQueue0(DEFAULT_MAX_PENDING_TASKS);
+    }
+    return queueFactory.newTaskQueue(DEFAULT_MAX_PENDING_TASKS);
+}
+```
+
+io.netty.channel.nio.NioEventLoop#newTaskQueue0
+
+```java
+private static Queue<Runnable> newTaskQueue0(int maxPendingTasks) {
+    // This event loop never calls takeTask()
+    return maxPendingTasks == Integer.MAX_VALUE ? PlatformDependent.<Runnable>newMpscQueue()//无界
+            : PlatformDependent.<Runnable>newMpscQueue(maxPendingTasks); //有界
+}
+```
+
+## ioRatio
+
+用来平衡NioEventLoop处理IO任务和非IO任务的时间。范围1-100,默认50.说明在处理IO上和处理非IO任务花费的时间相同。此值越小，花费在非IO任务上的时间越多。
+
+## 事件处理
+
+io.netty.channel.nio.NioEventLoop#run
+
+```java
+protected void run() {
+    for (;;) {
+        try {
+            try {
+                switch (selectStrategy.calculateStrategy(selectNowSupplier, hasTasks())) {
+                case SelectStrategy.CONTINUE:
+                    continue;
+
+                case SelectStrategy.BUSY_WAIT:
+
+                case SelectStrategy.SELECT:
+                    select(wakenUp.getAndSet(false));
+                    if (wakenUp.get()) {
+                        selector.wakeup();
+                    }
+                default:
+                }
+            } catch (IOException e) {
+                // 重建selector
+                rebuildSelector0();
+                handleLoopException(e);
+                continue;
+            }
+
+            cancelledKeys = 0;
+            needsToSelectAgain = false;
+            final int ioRatio = this.ioRatio;
+            if (ioRatio == 100) { //不会权衡io、非io任务的处理时间
+                try {
+                    processSelectedKeys(); //处理IO任务
+                } finally {
+                    // Ensure we always run tasks.
+                    runAllTasks(); //处理非io任务
+                }
+            } else {
+                final long ioStartTime = System.nanoTime();
+                try {
+                    processSelectedKeys();//处理IO任务
+                } finally {
+                    //立即处理io任务的时间
+                    final long ioTime = System.nanoTime() - ioStartTime;
+                    //指定处理非io任务的时间
+                    runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
+                }
+            }
+        } catch (Throwable t) {
+            handleLoopException(t);
+        }
+        try {
+            if (isShuttingDown()) {
+                closeAll();
+                if (confirmShutdown()) {
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            handleLoopException(t);
+        }
+    }
+}
+```
+
+### 计算策略
+
+io.netty.channel.DefaultSelectStrategy#calculateStrategy
+
+```java
+public int calculateStrategy(IntSupplier selectSupplier, boolean hasTasks) throws Exception {	//如果有任务，执行非阻塞的select，否则执行阻塞的select
+    return hasTasks ? selectSupplier.get() : SelectStrategy.SELECT; 
+}
+```
+
+```java
+private final IntSupplier selectNowSupplier = new IntSupplier() {
+    @Override
+    public int get() throws Exception {
+        return selectNow();
+    }
+};
+```
+
+io.netty.channel.nio.NioEventLoop#selectNow
+
+```java
+int selectNow() throws IOException {
+    try {
+        return selector.selectNow();
+    } finally {
+        // restore wakeup state if needed
+        if (wakenUp.get()) {
+            selector.wakeup();
+        }
+    }
+}
+```
+
+io.netty.channel.nio.NioEventLoop#select
+
+```java
+private void select(boolean oldWakenUp) throws IOException {
+    Selector selector = this.selector;
+    try {
+      	//统计select触发次数
+        int selectCnt = 0;
+        long currentTimeNanos = System.nanoTime();
+        //计算定时任务的触发时间
+        long selectDeadLineNanos = currentTimeNanos + delayNanos(currentTimeNanos);
+
+        long normalizedDeadlineNanos = selectDeadLineNanos - initialNanoTime();
+        if (nextWakeupTime != normalizedDeadlineNanos) {
+            nextWakeupTime = normalizedDeadlineNanos;
+        }
+
+        for (;;) {
+            long timeoutMillis = (selectDeadLineNanos - currentTimeNanos + 500000L) / 1000000L;
+            if (timeoutMillis <= 0) { //定时任务超时，直接退出循环
+                if (selectCnt == 0) { //尚未执行一次select操作，则执行非阻塞的select
+                    //非阻塞，没有数据返回0
+                    selector.selectNow();
+                    selectCnt = 1;
+                }
+                break;
+            }
+
+            if (hasTasks() && wakenUp.compareAndSet(false, true)) {
+                selector.selectNow();
+                selectCnt = 1;
+                break;
+            }
+          
+            //如果没有定时任务执行阻塞1s
+            int selectedKeys = selector.select(timeoutMillis);
+            selectCnt ++;
+
+            if (selectedKeys != 0 || oldWakenUp || wakenUp.get() || hasTasks() || hasScheduledTasks()) {
+                // - Selected something,
+                // - waken up by user, or
+                // - the task queue has a pending task.
+                // - a scheduled task is ready for processing
+                break;
+            }
+            if (Thread.interrupted()) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Selector.select() returned prematurely because " +
+                            "Thread.currentThread().interrupt() was called. Use " +
+                            "NioEventLoop.shutdownGracefully() to shutdown the NioEventLoop.");
+                }
+                selectCnt = 1;
+                break;
+            }
+
+            long time = System.nanoTime();
+            if (time - TimeUnit.MILLISECONDS.toNanos(timeoutMillis) >= currentTimeNanos) {
+                // timeoutMillis elapsed without anything selected.
+                selectCnt = 1;
+            } else if (SELECTOR_AUTO_REBUILD_THRESHOLD > 0 &&
+                    selectCnt >= SELECTOR_AUTO_REBUILD_THRESHOLD) { //触发空轮询次数的阈值
+                selector = selectRebuildSelector(selectCnt); //重新构建selector
+                selectCnt = 1;
+                break;
+            }
+
+            currentTimeNanos = time;
+        }
+
+        if (selectCnt > MIN_PREMATURE_SELECTOR_RETURNS) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Selector.select() returned prematurely {} times in a row for Selector {}.",
+                        selectCnt - 1, selector);
+            }
+        }
+    } catch (CancelledKeyException e) {
+        if (logger.isDebugEnabled()) {
+            logger.debug(CancelledKeyException.class.getSimpleName() + " raised by a Selector {} - JDK bug?",
+                    selector, e);
+        }
+    }
+}
+```
+
+### 处理IO事件
+
+io.netty.channel.nio.NioEventLoop#processSelectedKeys
+
+```java
+private void processSelectedKeys() {
+    if (selectedKeys != null) {  //不用JDK的selector.selectedKeys()
+        processSelectedKeysOptimized();
+    } else {
+        processSelectedKeysPlain(selector.selectedKeys());
+    }
+}
+```
+
+io.netty.channel.nio.NioEventLoop#processSelectedKeysOptimized
+
+```java
+private void processSelectedKeysOptimized() {
+    for (int i = 0; i < selectedKeys.size; ++i) {
+        final SelectionKey k = selectedKeys.keys[i];
+      
+        selectedKeys.keys[i] = null;
+
+        //selectionKey = javaChannel().register(eventLoop().unwrappedSelector(), 0, this);
+        final Object a = k.attachment();
+
+        if (a instanceof AbstractNioChannel) {
+            processSelectedKey(k, (AbstractNioChannel) a);
+        } else {
+            @SuppressWarnings("unchecked")
+            NioTask<SelectableChannel> task = (NioTask<SelectableChannel>) a;
+            processSelectedKey(k, task);
+        }
+
+        if (needsToSelectAgain) { //需要再次执行select
+            selectedKeys.reset(i + 1);
+
+            selectAgain();
+            i = -1;
+        }
+    }
+}
+```
+
+io.netty.channel.nio.NioEventLoop#processSelectedKey(java.nio.channels.SelectionKey, io.netty.channel.nio.AbstractNioChannel)
+
+```java
+private void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
+    final AbstractNioChannel.NioUnsafe unsafe = ch.unsafe();
+    if (!k.isValid()) { //SelectionKey无效
+        final EventLoop eventLoop;
+        try {
+            eventLoop = ch.eventLoop();
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (eventLoop != this || eventLoop == null) {
+            return;
+        }
+        unsafe.close(unsafe.voidPromise()); //关闭channel
+        return;
+    }
+
+    try {
+        int readyOps = k.readyOps();
+      
+        if ((readyOps & SelectionKey.OP_CONNECT) != 0) {
+            int ops = k.interestOps();
+            ops &= ~SelectionKey.OP_CONNECT;
+            k.interestOps(ops);
+            unsafe.finishConnect();
+        }
+
+        if ((readyOps & SelectionKey.OP_WRITE) != 0) {
+            ch.unsafe().forceFlush();
+        }
+
+        //处理读请求（断开连接）或接入连接
+        if ((readyOps & (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0) {
+            unsafe.read();
+        }
+    } catch (CancelledKeyException ignored) {
+        unsafe.close(unsafe.voidPromise());
+    }
+}
+```
+
+### 处理非IO任务
+
+io.netty.util.concurrent.SingleThreadEventExecutor#runAllTasks(long)
+
+```java
+protected boolean runAllTasks(long timeoutNanos) {
+    fetchFromScheduledTaskQueue();//将超时的定时任务放入任务队列
+    Runnable task = pollTask(); //从任务队列获取任务
+    if (task == null) {
+        afterRunningAllTasks();
+        return false;
+    }
+    //计算非io任务执行结束的时间
+    final long deadline = timeoutNanos > 0 ? ScheduledFutureTask.nanoTime() + timeoutNanos : 0;
+    long runTasks = 0;
+    long lastExecutionTime;
+    for (;;) {
+        safeExecute(task); //执行队列
+
+        runTasks ++;
+
+        if ((runTasks & 0x3F) == 0) { //每执行64次任务，判断是否结束执行非io任务
+            lastExecutionTime = ScheduledFutureTask.nanoTime();
+            if (lastExecutionTime >= deadline) {
+                break;
+            }
+        }
+
+        task = pollTask(); //获取任务
+        if (task == null) {
+            lastExecutionTime = ScheduledFutureTask.nanoTime();
+            break;
+        }
+    }
+
+    afterRunningAllTasks();
+    this.lastExecutionTime = lastExecutionTime;
+    return true;
+}
+```
+
+io.netty.util.concurrent.SingleThreadEventExecutor#fetchFromScheduledTaskQueue
+
+```java
+private boolean fetchFromScheduledTaskQueue() {
+    if (scheduledTaskQueue == null || scheduledTaskQueue.isEmpty()) {
+        return true;
+    }
+    long nanoTime = AbstractScheduledEventExecutor.nanoTime();
+    for (;;) {
+      	//从定时任务队列获取等待超时的任务
+        Runnable scheduledTask = pollScheduledTask(nanoTime);
+        if (scheduledTask == null) {
+            return true;
+        }
+        //将定时任务放入任务队列
+        if (!taskQueue.offer(scheduledTask)) {
+            scheduledTaskQueue.add((ScheduledFutureTask<?>) scheduledTask);//放回定时任务队列
+            return false;
+        }
+    }
+}
+```
+
+
+
 # FlushConsolidationHandler
 
 刷新操作通常开销很大，因为这些操作可能会触发系统调用。因此,在大多数情况下(写延迟可以与吞吐量进行权衡)，尽量减少刷新操作
@@ -1923,9 +2535,7 @@ private V initialize(InternalThreadLocalMap threadLocalMap) { //设置初始值
 
 # HashedWheelTimer
 
-处理延迟任务的时间轮，延迟任务的新增和删除都是O(1)的复杂度，只需一个线程就可以驱动时间轮进行工作
-
-io.netty.util.TimerTask，自定义的延迟任务实现此接口
+处理延迟任务的时间轮，延迟任务的新增和删除都是O(1)的复杂度，只需一个线程就可以驱动时间轮进行工作。对延迟任务的真正删除会延迟执行
 
 ## 初始化
 
@@ -1999,7 +2609,7 @@ private static HashedWheelBucket[] createWheel(int ticksPerWheel) {
 io.netty.util.HashedWheelTimer#newTimeout
 
 ```java
-public Timeout newTimeout(TimerTask task, long delay, TimeUnit unit) {
+public Timeout newTimeout(TimerTask task, long delay, TimeUnit unit) {//时间复杂度O(1)
     ObjectUtil.checkNotNull(task, "task");
     ObjectUtil.checkNotNull(unit, "unit");
     //任务数
@@ -2016,15 +2626,30 @@ public Timeout newTimeout(TimerTask task, long delay, TimeUnit unit) {
     if (delay > 0 && deadline < 0) {
         deadline = Long.MAX_VALUE;
     }
-    //创建定时任务
+    //创建HashedWheelTimeout，封装定时任务
     HashedWheelTimeout timeout = new HashedWheelTimeout(this, task, deadline);
-    //添加到MpscQueue
+    //添加到MpscQueue（多生产者单消费者队列）
     timeouts.add(timeout);
     return timeout;
 }
 ```
 
-### 启动工作线程
+## 删除任务
+
+io.netty.util.HashedWheelTimer.HashedWheelTimeout#cancel
+
+```java
+public boolean cancel() { //时间复杂度O(1)
+    if (!compareAndSetState(ST_INIT, ST_CANCELLED)) {//修改任务的状态为删除状态
+        return false;
+    }
+   //添加到删除队列（多生产者单消费者队列，尽可能减少锁的负载）。延迟删除，至少等待一个执行周期。避免了多个线程同时进行删除时对锁的争夺
+    timer.cancelledTimeouts.add(this);
+    return true;
+}
+```
+
+## 启动工作线程
 
 io.netty.util.HashedWheelTimer#start
 
@@ -2100,7 +2725,7 @@ public void run() {
 }
 ```
 
-### 移除被取消的任务
+### 移除被删除的任务
 
 io.netty.util.HashedWheelTimer.Worker#processCancelledTasks
 
@@ -2122,7 +2747,7 @@ private void processCancelledTasks() {
 }
 ```
 
-### 从队列取任务加入到时间轮
+### 添加任务到时间轮
 
 io.netty.util.HashedWheelTimer.Worker#transferTimeoutsToBuckets
 
@@ -2166,7 +2791,7 @@ public void expireTimeouts(long deadline) {
                 throw new IllegalStateException(String.format(
                         "timeout.deadline (%d) > deadline (%d)", timeout.deadline, deadline));
             }
-        } else if (timeout.isCancelled()) { //如果被删除，从双向链表中移除到
+        } else if (timeout.isCancelled()) { //如果被删除，从双向链表中移除
             next = remove(timeout);
         } else { //圈数减1
             timeout.remainingRounds --;
@@ -2503,6 +3128,8 @@ static <T> Queue<T> newMpscQueue(final int maxCapacity) {
 
 ### 客户端
 
+HttpClientUpgradeHandler
+
 io.netty.handler.codec.http.HttpClientUpgradeHandler#write
 
 ```java
@@ -2512,6 +3139,7 @@ public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
         ctx.write(msg, promise);
         return;
     }
+
 
     if (upgradeRequested) {
         promise.setFailure(new IllegalStateException(
@@ -2898,7 +3526,7 @@ private void sendPreface(ChannelHandlerContext ctx) throws Exception {
 	
   	//只有client端才会发送连接前言
     final boolean isClient = !connection().isServer();
-    if (isClient) {
+    if (isClient) { 
       ctx.write(connectionPrefaceBuf()).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
     }
   
@@ -3110,6 +3738,119 @@ private void processPayloadState(ChannelHandlerContext ctx, ByteBuf in, Http2Fra
             break;
     }
     in.readerIndex(payloadEndIndex);
+}
+```
+
+# 解码器
+
+## FixedLengthFrameDecoder
+
+固定长度，实现简单，但是会有空间的浪费
+
+io.netty.handler.codec.FixedLengthFrameDecoder#FixedLengthFrameDecoder
+
+```java
+public FixedLengthFrameDecoder(int frameLength) {
+    checkPositive(frameLength, "frameLength");
+    this.frameLength = frameLength; //固定长度
+}
+```
+
+io.netty.handler.codec.FixedLengthFrameDecoder#decode
+
+```java
+protected final void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+    Object decoded = decode(ctx, in); //解码
+    if (decoded != null) {
+        out.add(decoded);
+    }
+}
+```
+
+```java
+protected Object decode(
+        @SuppressWarnings("UnusedParameters") ChannelHandlerContext ctx, ByteBuf in) throws Exception {
+    if (in.readableBytes() < frameLength) { //可读取的字节数少于固定长度
+        return null;
+    } else {
+        return in.readRetainedSlice(frameLength); //读取完整数据
+    }
+}
+```
+
+## DelimiterBasedFrameDecoder
+
+分隔符解码器，实现简单，需要扫描内容查找分隔符
+
+io.netty.handler.codec.DelimiterBasedFrameDecoder#decode
+
+```java
+protected Object decode(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
+    if (lineBasedDecoder != null) {
+        return lineBasedDecoder.decode(ctx, buffer);
+    }
+    // Try all delimiters and choose the delimiter which yields the shortest frame.
+    int minFrameLength = Integer.MAX_VALUE;
+    ByteBuf minDelim = null;
+    for (ByteBuf delim: delimiters) {
+        int frameLength = indexOf(buffer, delim);
+        if (frameLength >= 0 && frameLength < minFrameLength) {
+            minFrameLength = frameLength;
+            minDelim = delim;
+        }
+    }
+
+    if (minDelim != null) {
+        int minDelimLength = minDelim.capacity();
+        ByteBuf frame;
+
+        if (discardingTooLongFrame) {
+            // We've just finished discarding a very large frame.
+            // Go back to the initial state.
+            discardingTooLongFrame = false;
+            buffer.skipBytes(minFrameLength + minDelimLength);
+
+            int tooLongFrameLength = this.tooLongFrameLength;
+            this.tooLongFrameLength = 0;
+            if (!failFast) {
+                fail(tooLongFrameLength);
+            }
+            return null;
+        }
+
+        if (minFrameLength > maxFrameLength) {
+            // Discard read frame.
+            buffer.skipBytes(minFrameLength + minDelimLength);
+            fail(minFrameLength);
+            return null;
+        }
+
+        if (stripDelimiter) {
+            frame = buffer.readRetainedSlice(minFrameLength);
+            buffer.skipBytes(minDelimLength);
+        } else {
+            frame = buffer.readRetainedSlice(minFrameLength + minDelimLength);
+        }
+
+        return frame;
+    } else {
+        if (!discardingTooLongFrame) {
+            if (buffer.readableBytes() > maxFrameLength) {
+                // Discard the content of the buffer until a delimiter is found.
+                tooLongFrameLength = buffer.readableBytes();
+                buffer.skipBytes(buffer.readableBytes());
+                discardingTooLongFrame = true;
+                if (failFast) {
+                    fail(tooLongFrameLength);
+                }
+            }
+        } else {
+            // Still discarding the buffer since a delimiter is not found.
+            tooLongFrameLength += buffer.readableBytes();
+            buffer.skipBytes(buffer.readableBytes());
+        }
+        return null;
+    }
 }
 ```
 
