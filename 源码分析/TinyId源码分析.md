@@ -35,7 +35,7 @@ public Response<List<Long>> nextId(String bizType, Integer batchSize, String tok
     try {
       	//根据业务类型，获取对应的IdGenerator
         IdGenerator idGenerator = idGeneratorFactoryServer.getIdGenerator(bizType);
-      	//生成批量Id
+      	//服务端生成批量Id
         List<Long> ids = idGenerator.nextId(newBatchSize);
         response.setData(ids);
     } catch (Exception e) {
@@ -140,7 +140,7 @@ public SegmentId getNextSegmentId(String bizType) {
         Long oldMaxId = tinyIdInfo.getMaxId();
         int row = tinyIdInfoDAO.updateMaxId(tinyIdInfo.getId(), newMaxId, oldMaxId, tinyIdInfo.getVersion(),
                 tinyIdInfo.getBizType());
-        if (row == 1) {
+        if (row == 1) { //乐观锁修改成功
             tinyIdInfo.setMaxId(newMaxId);
             SegmentId segmentId = convert(tinyIdInfo);
             logger.info("getNextSegmentId success tinyIdInfo:{} current:{}", tinyIdInfo, segmentId);
@@ -255,7 +255,7 @@ com.xiaoju.uemc.tinyid.base.generator.impl.CachedIdGenerator#loadNext
 
 ```java
 public void loadNext() {
-    //currentSegmentId使用量超过阈值，从数据加载填充nextSegmentId；只有当nextSegmentId为空并且当前没有其他线程正在加载
+    //currentSegmentId使用量超过阈值，从数据库加载填充nextSegmentId；只有当nextSegmentId为空并且当前没有其他线程正在加载
     if (next == null && !isLoadingNext) {
         synchronized (lock) {
             if (next == null && !isLoadingNext) {
@@ -279,7 +279,7 @@ public void loadNext() {
 
 # 客户端本地生成Id
 
-客户端复用了服务端生成Id的代码，不同就是客户端是发送HTTP请求到服务端请求SegmentId，而服务端是从数据库获取SegmentId，客户端本地本地生成Id,减轻了服务端的负载压力
+客户端复用了服务端生成Id的代码。客户端发送HTTP请求到服务端请求SegmentId，客户端本地本地生成Id,减轻了服务端的负载压力
 
 com.xiaoju.uemc.tinyid.server.controller.IdContronller#nextSegmentId
 
