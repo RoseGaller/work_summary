@@ -955,14 +955,14 @@ public final void read() {
                     // nothing was read. release the buffer.
                     byteBuf.release();
                     byteBuf = null;
-                    close = allocHandle.lastBytesRead() < 0;
+                    close = allocHandle.lastBytesRead() < 0; //表明发生了IO异常，关闭连接 
                     if (close) {
                         // There is nothing left to read as we received an EOF.
                         readPending = false;
                     }
                     break;
                 }
-
+								//增加读取的次数，默认16
                 allocHandle.incMessagesRead(1);
                 readPending = false;
                 //pipeline上执行，业务逻辑的处理就在这个地方
@@ -2197,6 +2197,398 @@ private boolean fetchFromScheduledTaskQueue() {
 ```
 
 
+
+# DefaultPromise
+
+```java
+private static final AtomicReferenceFieldUpdater<DefaultPromise, Object> RESULT_UPDATER =
+        AtomicReferenceFieldUpdater.newUpdater(DefaultPromise.class, Object.class, "result"); //并发下修改result
+private static final Object SUCCESS = new Object(); //结果为空时，设置result为SUCCESS
+private static final Object UNCANCELLABLE = new Object(); //设置为不可取消
+```
+
+io.netty.util.concurrent.DefaultPromise#setSuccess
+
+```java
+public Promise<V> setSuccess(V result) {
+    if (setSuccess0(result)) {
+        return this;
+    }
+    throw new IllegalStateException("complete already: " + this);
+}
+```
+
+```java
+private boolean setSuccess0(V result) {
+    return setValue0(result == null ? SUCCESS : result);
+}
+```
+
+```java
+private boolean setValue0(Object objResult) {
+    if (RESULT_UPDATER.compareAndSet(this, null, objResult) ||
+        RESULT_UPDATER.compareAndSet(this, UNCANCELLABLE, objResult)) {//CAS修改结果
+        if (checkNotifyWaiters()) { 
+            notifyListeners(); //触发监听器
+        }
+        return true;
+    }
+    return false;
+}
+```
+
+```java
+private synchronized boolean checkNotifyWaiters() {
+    if (waiters > 0) {
+        notifyAll();
+    }
+    return listeners != null; //设置的监听器不为空
+}
+```
+
+io.netty.util.concurrent.DefaultPromise#notifyListeners
+
+```java
+private void notifyListeners() {
+    EventExecutor executor = executor();
+    if (executor.inEventLoop()) {//在NioEventLoop中
+        final InternalThreadLocalMap threadLocals = InternalThreadLocalMap.get();
+        final int stackDepth = threadLocals.futureListenerStackDepth();
+        if (stackDepth < MAX_LISTENER_STACK_DEPTH) {
+            threadLocals.setFutureListenerStackDepth(stackDepth + 1);
+            try {
+                notifyListenersNow();
+            } finally {
+                threadLocals.setFutureListenerStackDepth(stackDepth);
+            }
+            return;
+        }
+    }
+
+    safeExecute(executor, new Runnable() {
+        @Override
+        public void run() {
+            notifyListenersNow();
+        }
+    });
+}
+```
+
+io.netty.util.concurrent.DefaultPromise#notifyListenersNow
+
+```java
+private void notifyListenersNow() {
+    Object listeners;
+    synchronized (this) {
+        if (notifyingListeners || this.listeners == null) { //已经触发或者尚未注册监听器
+            return;
+        }
+        notifyingListeners = true;  
+        listeners = this.listeners;
+        this.listeners = null;
+    }
+    for (;;) {
+        if (listeners instanceof DefaultFutureListeners) {
+            notifyListeners0((DefaultFutureListeners) listeners);
+        } else {
+            notifyListener0(this, (GenericFutureListener<?>) listeners);
+        }
+        synchronized (this) {
+            if (this.listeners == null) {
+                // Nothing can throw from within this method, so setting notifyingListeners back to false does not
+                // need to be in a finally block.
+                notifyingListeners = false;
+                return;
+            }
+            listeners = this.listeners;
+            this.listeners = null;
+        }
+    }
+}
+```
+
+io.netty.util.concurrent.DefaultPromise#await()
+
+```java
+public Promise<V> await() throws InterruptedException {
+    if (isDone()) { //是否已经完成
+        return this;
+    }
+
+    if (Thread.interrupted()) { //线程被中断
+        throw new InterruptedException(toString());
+    }
+
+    checkDeadLock(); //检查死锁
+
+    synchronized (this) {
+        while (!isDone()) { //循环判断，防止线程被意外唤醒导致的功能异常
+            incWaiters(); //增加waiter，统计waiter数量，防止waiter数量过多
+            try {
+                wait();
+            } finally {
+                decWaiters(); //减少waiter
+            }
+        }
+    }
+    return this;
+}
+```
+
+# 链表有效性检测
+
+当有业务消息时，无须心跳检测。当链路空闲即无数据读写时才会发送心跳消息
+
+## 初始化
+
+io.netty.handler.timeout.IdleStateHandler#IdleStateHandler(boolean, long, long, long, java.util.concurrent.TimeUnit)
+
+```java
+public IdleStateHandler(boolean observeOutput,
+        long readerIdleTime, long writerIdleTime, long allIdleTime,
+        TimeUnit unit) {
+    ObjectUtil.checkNotNull(unit, "unit");
+
+    this.observeOutput = observeOutput; //写空闲触发时，是否考虑字节的消耗
+
+  	//计算读空闲时间
+    if (readerIdleTime <= 0) {
+        readerIdleTimeNanos = 0;
+    } else {
+        readerIdleTimeNanos = Math.max(unit.toNanos(readerIdleTime), MIN_TIMEOUT_NANOS);
+    }
+    
+    //计算写空闲时间
+    if (writerIdleTime <= 0) {
+        writerIdleTimeNanos = 0;
+    } else {
+        writerIdleTimeNanos = Math.max(unit.toNanos(writerIdleTime), MIN_TIMEOUT_NANOS);
+    }
+  	
+    //计算读写空闲时间
+    if (allIdleTime <= 0) {
+        allIdleTimeNanos = 0;
+    } else {
+        allIdleTimeNanos = Math.max(unit.toNanos(allIdleTime), MIN_TIMEOUT_NANOS);
+    }
+}
+```
+
+## handlerAdded
+
+将IdleStateHandler添加到Pipeline时，触发此方法
+
+io.netty.handler.timeout.IdleStateHandler#handlerAdded
+
+```java
+public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+    if (ctx.channel().isActive() && ctx.channel().isRegistered()) {
+        initialize(ctx);
+    } else {
+    }
+}
+```
+
+io.netty.handler.timeout.IdleStateHandler#initialize
+
+```java
+private void initialize(ChannelHandlerContext ctx) {
+    // Avoid the case where destroy() is called before scheduling timeouts.
+    // See: https://github.com/netty/netty/issues/143
+    switch (state) {
+    case 1: //已经初始化
+    case 2: //已经被销毁
+        return;
+    }
+
+    state = 1;
+    initOutputChanged(ctx);
+		
+  	//上次读写时间
+    lastReadTime = lastWriteTime = ticksInNanos();
+    //创建读写定时任务，定时任务由channel对应的NioEventLoop处理
+    if (readerIdleTimeNanos > 0) {
+        readerIdleTimeout = schedule(ctx, new ReaderIdleTimeoutTask(ctx),
+                readerIdleTimeNanos, TimeUnit.NANOSECONDS); //读空闲
+    }
+    if (writerIdleTimeNanos > 0) {
+        writerIdleTimeout = schedule(ctx, new WriterIdleTimeoutTask(ctx),
+                writerIdleTimeNanos, TimeUnit.NANOSECONDS); //写空闲
+    }
+    if (allIdleTimeNanos > 0) {
+        allIdleTimeout = schedule(ctx, new AllIdleTimeoutTask(ctx),
+                allIdleTimeNanos, TimeUnit.NANOSECONDS); //读写空闲
+    }
+}
+```
+
+io.netty.handler.timeout.IdleStateHandler#initOutputChanged
+
+```java
+private void initOutputChanged(ChannelHandlerContext ctx) {
+    if (observeOutput) { //默认false
+        Channel channel = ctx.channel();
+        Unsafe unsafe = channel.unsafe();
+        ChannelOutboundBuffer buf = unsafe.outboundBuffer();
+
+        if (buf != null) {
+          	//计算当前正在写的数据的hashcode
+            lastMessageHashCode = System.identityHashCode(buf.current());
+            //尚未flush的字节数
+            lastPendingWriteBytes = buf.totalPendingWriteBytes();
+            //当前flush进度
+            lastFlushProgress = buf.currentProgress();
+        }
+    }
+}
+```
+
+## 空闲任务
+
+### ReaderIdleTimeoutTask
+
+io.netty.handler.timeout.IdleStateHandler.ReaderIdleTimeoutTask#run
+
+```java
+protected void run(ChannelHandlerContext ctx) { //读空闲
+    long nextDelay = readerIdleTimeNanos;
+    if (!reading) {
+        nextDelay -= ticksInNanos() - lastReadTime;
+    }
+
+    if (nextDelay <= 0) { //触发读空闲
+        //再次创建定时任务
+        readerIdleTimeout = schedule(ctx, this, readerIdleTimeNanos, TimeUnit.NANOSECONDS);
+
+        boolean first = firstReaderIdleEvent; //第一次触发为true
+        firstReaderIdleEvent = false;
+
+        try {
+          	//创建空闲事件
+            IdleStateEvent event = newIdleStateEvent(IdleState.READER_IDLE, first);
+          	//向后传递空闲事件
+            channelIdle(ctx, event);
+        } catch (Throwable t) {
+            ctx.fireExceptionCaught(t);
+        }
+    } else {
+        // 未触发读空闲。再次创建定时任务
+        readerIdleTimeout = schedule(ctx, this, nextDelay, TimeUnit.NANOSECONDS);
+    }
+}
+```
+
+### WriterIdleTimeoutTask
+
+io.netty.handler.timeout.IdleStateHandler.WriterIdleTimeoutTask#run
+
+```java
+protected void run(ChannelHandlerContext ctx) { //写空闲
+
+    long lastWriteTime = IdleStateHandler.this.lastWriteTime;
+    long nextDelay = writerIdleTimeNanos - (ticksInNanos() - lastWriteTime);
+    if (nextDelay <= 0) { //触发写空闲
+        //创建新的定时任务
+        writerIdleTimeout = schedule(ctx, this, writerIdleTimeNanos, TimeUnit.NANOSECONDS);
+
+        boolean first = firstWriterIdleEvent;
+        firstWriterIdleEvent = false;
+
+        try {
+            if (hasOutputChanged(ctx, first)) { //ChannelOutboundBuffer有变化，返回true
+                return;
+            }
+						//传递写空闲事件
+            IdleStateEvent event = newIdleStateEvent(IdleState.WRITER_IDLE, first);
+            channelIdle(ctx, event);
+        } catch (Throwable t) {
+            ctx.fireExceptionCaught(t);
+        }
+    } else {  //创建新的定时任务
+        writerIdleTimeout = schedule(ctx, this, nextDelay, TimeUnit.NANOSECONDS);
+    }
+}
+```
+
+io.netty.handler.timeout.IdleStateHandler#hasOutputChanged
+
+```java
+private boolean hasOutputChanged(ChannelHandlerContext ctx, boolean first) {
+    if (observeOutput) { //默认false，ChannelOutboundBuffer有变化，返回true，不会触发写空闲事件
+
+        if (lastChangeCheckTimeStamp != lastWriteTime) {
+            lastChangeCheckTimeStamp = lastWriteTime;
+          
+            if (!first) {
+                return true;
+            }
+        }
+
+        Channel channel = ctx.channel();
+        Unsafe unsafe = channel.unsafe();
+        ChannelOutboundBuffer buf = unsafe.outboundBuffer();
+
+        if (buf != null) {
+            int messageHashCode = System.identityHashCode(buf.current());
+            long pendingWriteBytes = buf.totalPendingWriteBytes();
+
+            if (messageHashCode != lastMessageHashCode || pendingWriteBytes != lastPendingWriteBytes) {
+                lastMessageHashCode = messageHashCode;
+                lastPendingWriteBytes = pendingWriteBytes;
+
+                if (!first) {
+                    return true;
+                }
+            }
+
+            long flushProgress = buf.currentProgress();
+            if (flushProgress != lastFlushProgress) {
+                lastFlushProgress = flushProgress;
+
+                if (!first) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+```
+
+### AllIdleTimeoutTask
+
+io.netty.handler.timeout.IdleStateHandler.AllIdleTimeoutTask#run
+
+```java
+protected void run(ChannelHandlerContext ctx) { //读写空闲
+
+    long nextDelay = allIdleTimeNanos;
+    if (!reading) {
+        nextDelay -= ticksInNanos() - Math.max(lastReadTime, lastWriteTime);
+    }
+    if (nextDelay <= 0) {
+        //创建新的定时任务
+        allIdleTimeout = schedule(ctx, this, allIdleTimeNanos, TimeUnit.NANOSECONDS);
+
+        boolean first = firstAllIdleEvent;
+        firstAllIdleEvent = false;
+
+        try {
+            if (hasOutputChanged(ctx, first)) {
+                return;
+            }
+						//传递ALL_IDLE
+            IdleStateEvent event = newIdleStateEvent(IdleState.ALL_IDLE, first);
+            channelIdle(ctx, event);
+        } catch (Throwable t) {
+            ctx.fireExceptionCaught(t);
+        }
+    } else { //创建新的定时任务
+        allIdleTimeout = schedule(ctx, this, nextDelay, TimeUnit.NANOSECONDS);
+    }
+}
+```
 
 # FlushConsolidationHandler
 
