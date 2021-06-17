@@ -75,7 +75,7 @@ protected void doInit() {
         @Override
         protected void initChannel(SocketChannel channel) {
             ChannelPipeline pipeline = channel.pipeline();
-            //设置解码器
+            //设置解码器，非共享
             pipeline.addLast("decoder", codec.newDecoder());
             //设置编码器
             pipeline.addLast("encoder", codec.newEncoder());
@@ -92,20 +92,14 @@ protected void doInit() {
             //创建Connection
             createConnection(channel);
         }
-        /**
-         * create connection operation<br>
-         * <ul>
-         * <li>If flag manageConnection be true, use {@link DefaultConnectionManager} to add a new connection, meanwhile bind it with the channel.</li>
-         * <li>If flag manageConnection be false, just create a new connection and bind it with the channel.</li>
-         * </ul>
-         */
+      
         private void createConnection(SocketChannel channel) {
             Url url = addressParser.parse(RemotingUtil.parseRemoteAddress(channel));
             if (switches().isOn(GlobalSwitch.SERVER_MANAGE_CONNECTION_SWITCH)) {
                 //管理创建的Channel
                 connectionManager.add(new Connection(channel, url), url.getUniqueKey());
             } else {
-                new Connection(channel, url);
+                new Connection(channel, url);//创建connection并将其与channel绑定
             }
             //传递Channel连接事件
             channel.pipeline().fireUserEventTriggered(ConnectionEventType.CONNECT);
@@ -135,6 +129,29 @@ public void registerUserProcessor(UserProcessor<?> processor) {
 }
 ```
 
+# ServerIdleHandler
+
+服务端处理读写空闲事件
+
+com.alipay.remoting.ServerIdleHandler#userEventTriggered
+
+```java
+public void userEventTriggered(final ChannelHandlerContext ctx, Object evt) throws Exception {
+    //处理读写空闲事件
+    if (evt instanceof IdleStateEvent) {
+        try {
+            logger.warn("Connection idle, close it from server side: {}",
+                RemotingUtil.parseRemoteAddress(ctx.channel()));
+            ctx.close();
+        } catch (Exception e) {
+            logger.warn("Exception caught when closing connection in ServerIdleHandler.", e);
+        }
+    } else {
+        super.userEventTriggered(ctx, evt);
+    }
+}
+```
+
 # 解码
 
 ## 创建解码器
@@ -144,10 +161,11 @@ com.alipay.remoting.rpc.RpcCodec
 ```java
 @Override
 public ChannelHandler newDecoder() {//解码器
-    //默认协议的长度为1
     return new RpcProtocolDecoder(RpcProtocolManager.DEFAULT_PROTOCOL_CODE_LENGTH);
 }
 ```
+
+根据读取数据封装成RequestCommand，尚未反序列化requestclass、header、body。在RpcHandler处理过程中根据实际需要进行反序列化，延迟反序列化或者避免无用的反序列化，降低资源消耗
 
 com.alipay.remoting.codec.ProtocolCodeBasedDecoder#decode
 
@@ -840,3 +858,5 @@ public void doProcess(RemotingContext ctx, RemotingCommand cmd) {
 4、灵活配置业务请求是在IO线程中处理还是由业务线程池处理
 
 5、线程池选择器 `ExecutorSelector` ：用户可以提供多个业务线程池，使用 `ExecutorSelector` 来实现选择合适的线程池
+
+6、按需进行反序列化，降低资源消耗
