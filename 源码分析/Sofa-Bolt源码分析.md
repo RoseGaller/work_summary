@@ -205,25 +205,19 @@ protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) t
 ```java
 public static final Cumulator MERGE_CUMULATOR     = new Cumulator() { //累积读取到的字节	
                                                       @Override
-                                                      public ByteBuf cumulate(ByteBufAllocator alloc,
-                                                                              ByteBuf cumulation,
-                                                                              ByteBuf in) {
-                                                          ByteBuf buffer;
-                                                          if (cumulation.writerIndex() > cumulation
-                                                              .maxCapacity()
-                                                                                         - in.readableBytes()
-                                                              || cumulation.refCnt() > 1) { //cumulation没有足够空间容纳新读取的数据，进行扩容
-                                                              buffer = expandCumulation(alloc,
-                                                                  cumulation,
-                                                                  in.readableBytes());
-                                                          } else {
-                                                              buffer = cumulation;
-                                                          }
-                                                          buffer.writeBytes(in); //累积新读取的数据
-                                                          in.release();//及时释放内存
-                                                          return buffer;
-                                                      }
-                                                  };
+                                                      public ByteBuf cumulate(ByteBufAllocator alloc, ByteBuf cumulation, ByteBuf in) {
+            ByteBuf buffer;
+              if (cumulation.writerIndex() > cumulation.maxCapacity() -in.readableBytes()
+                  || cumulation.refCnt() > 1) { //cumulation没有足够空间容纳新读取的数据，进行扩容
+                  buffer = expandCumulation(alloc,cumulation, in.readableBytes());
+             } else {
+                  buffer = cumulation;
+             }
+             buffer.writeBytes(in); //累积新读取的数据
+             in.release();//释放读取的数据占用的内存
+             return buffer;
+       }
+     };
 ```
 
 ## 读取数据
@@ -752,12 +746,16 @@ protected RemotingCommand invokeSync(final Connection conn, final RemotingComman
 }
 ```
 
-## 异步执行，返回future，
+## 异步执行
+
+返回future
+
+com.alipay.remoting.BaseRemoting#invokeWithFuture
 
 ```java
-protected InvokeFuture invokeWithFuture(final Connection conn, final RemotingCommand request,
-                                        final int timeoutMillis) {
+protected InvokeFuture invokeWithFuture(final Connection conn, final RemotingCommand request,final int timeoutMillis) {
     final InvokeFuture future = createInvokeFuture(request, request.getInvokeContext());
+  	//Connection维护InvokeFuture
     conn.addInvokeFuture(future);
     final int requestId = request.getId();
     try {
@@ -779,10 +777,10 @@ protected InvokeFuture invokeWithFuture(final Connection conn, final RemotingCom
 
             @Override
             public void operationComplete(ChannelFuture cf) throws Exception {
-                if (!cf.isSuccess()) {
+                if (!cf.isSuccess()) { //发送失败
                     InvokeFuture f = conn.removeInvokeFuture(requestId);
                     if (f != null) {
-                        f.cancelTimeout();
+                        f.cancelTimeout(); //删除定时任务
                         f.putResponse(commandFactory.createSendFailedResponse(
                             conn.getRemoteAddress(), cf.cause()));
                     }
@@ -814,7 +812,7 @@ com.alipay.remoting.rpc.protocol.RpcResponseProcessor#doProcess
 public void doProcess(RemotingContext ctx, RemotingCommand cmd) {
 		//获取Channel的Connection对象
     Connection conn = ctx.getChannelContext().channel().attr(Connection.CONNECTION).get();
-  //根据请求Id从Connection获取InvokeFuture
+    //根据请求Id从Connection获取InvokeFuture，Connection对象维护了此channel已发送但未接收响应的请求
     InvokeFuture future = conn.removeInvokeFuture(cmd.getId());
     ClassLoader oldClassLoader = null;
     try {
@@ -851,12 +849,19 @@ public void doProcess(RemotingContext ctx, RemotingCommand cmd) {
 
 1、借助HashedWheelTimer实现超时机制
 
-2、快速失败，服务端解码成功之后记录一个到达时间，当开始进行请求处理的时候，计算当前时间与到达时间的差值超过请求的超时时间，将此请求丢弃。在RPC框架中，还会记录请求开始时间和请求执行完毕的时间，统计请求排队的时间和请求处理的时间。请求执行完毕，计算当前时间与到达时间的差值，如果超过超时时间，将此请求丢弃
+2、快速失败
 
-3、批量优化。对Netty的解码器进行了优化，将解码出的业务对象，组装成List，批量提交给ChannelPipiline处理
+​		服务端解码成功之后记录一个到达时间，当开始进行请求处理的时候，计算当前时间与到达时间的差值超过请求的超时时间，将此请求丢弃。
+
+​		在RPC框架中，还会记录请求开始时间和请求执行完毕的时间，统计请求排队的时间和请求处理的时间。请求执行完毕，计算当前时间与到达时间的差值，如果超时，将此请求丢弃
+
+3、批量优化
+
+​      对Netty的解码器进行了优化，将解码出的业务对象，组装成List，批量提交给ChannelPipeline处理
 
 4、灵活配置业务请求是在IO线程中处理还是由业务线程池处理
 
-5、线程池选择器 `ExecutorSelector` ：用户可以提供多个业务线程池，使用 `ExecutorSelector` 来实现选择合适的线程池
+5、线程池选择器 `ExecutorSelector` ：用户可以提供多个业务线程池，使用 `ExecutorSelector` 来实现选择合适的线程池，不同的请求使用不同的线程池，对请求进行隔离
 
 6、按需进行反序列化，降低资源消耗
+
