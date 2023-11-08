@@ -493,6 +493,16 @@ public boolean offer(Runnable runnable) {
 
 从 2.7.5 版本开始，Dubbo 引入了服务自省架构。以应用维度进行注册，而不是接口维度进行注册。减轻注册中心的压力
 
+1、Provider启动，发布业务服务同时发布元数据服务
+
+2、向注册中心注册（应用名 -> ip地址）
+
+3、Consumer启动，根据应用名向注册中心拉取ip列表
+
+4、Consumer根据IP地址向Provider发送元数据请求服务，获取接口级别的元数据信息
+
+5、Consumer根据返回的元数据向对应的Provider发送调用业务服务的请求
+
 ## 提供方发布
 
 org.apache.dubbo.config.event.listener.ServiceNameMappingListener#onEvent
@@ -553,11 +563,27 @@ protected static String buildGroup(String serviceInterface, String group, String
 
 ## 消费方订阅
 
+```java
+protected void subscribeURLs(URL url, NotifyListener listener) {
+
+    writableMetadataService.subscribeURL(url);
+
+ 	 //根据url获取servciceNames
+    Set<String> serviceNames = getServices(url); 
+    if (CollectionUtils.isEmpty(serviceNames)) {
+        throw new IllegalStateException("Should has at least one way to know which services this interface belongs to, subscription url: " + url);
+    }
+		//根据serviceNames从注册中心获取对应的ip地址
+    serviceNames.forEach(serviceName -> subscribeURLs(url, listener, serviceName));
+
+}
+```
+
 org.apache.dubbo.metadata.DynamicConfigurationServiceNameMapping#get
 
 ```java
-public Set<String> get(String serviceInterface, String group, String version, String protocol) { //根据接口名称从配置中心拉取应用服务名称
-
+public Set<String> get(String serviceInterface, String group, String version, String protocol) { 
+  		//根据接口名称从配置中心拉取应用服务名称
     DynamicConfiguration dynamicConfiguration = DynamicConfiguration.getDynamicConfiguration();
 
     Set<String> serviceNames = new LinkedHashSet<>();
@@ -566,6 +592,24 @@ public Set<String> get(String serviceInterface, String group, String version, St
         serviceNames.addAll(keys);
     });
     return Collections.unmodifiableSet(serviceNames);
+}
+```
+
+```java
+protected void subscribeURLs(URL url, NotifyListener listener, String serviceName) {
+	//根据serviceName从注册中获取ip地址
+    List<ServiceInstance> serviceInstances = serviceDiscovery.getInstances(serviceName);
+
+    subscribeURLs(url, listener, serviceName, serviceInstances);
+
+    // register ServiceInstancesChangedListener
+    registerServiceInstancesChangedListener(url, new ServiceInstancesChangedListener(serviceName) {
+
+        @Override
+        public void onEvent(ServiceInstancesChangedEvent event) {
+            subscribeURLs(url, listener, event.getServiceName(), new ArrayList<>(event.getServiceInstances()));
+        }
+    });
 }
 ```
 
