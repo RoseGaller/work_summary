@@ -41,7 +41,7 @@
 
 3、如果影子单元格的提交时间小于当前读事务的开始时间，那么单元格的数据对客户端时可见的
 
-4、如果没有影子单元格，去提交表中查找单元格的提交时间，提交表中不存在，对单元格的写事务被终止了。
+4、如果没有影子单元格，去提交表中查找单元格的提交时间，提交表中不存在，返回null
 
 # Quikstart
 
@@ -65,15 +65,19 @@ public class Example {
         byte[] qualifier = Bytes.toBytes("foo");
         byte[] dataValue1 = Bytes.toBytes("val1");
         byte[] dataValue2 = Bytes.toBytes("val2");
+      
 				//开启事务
         Transaction tx = tm.begin();
+      
+        //执行业务
         Put row1 = new Put(exampleRow1);
         row1.add(family, qualifier, dataValue1);
-        tt.put(tx, row1);
+        tt.put(tx, row1);	
       
         Put row2 = new Put(exampleRow2);
         row2.add(family, qualifier, dataValue2);
         tt.put(tx, row2);
+      
       	//提交事务
         tm.commit(tx);
 
@@ -105,9 +109,9 @@ public final Transaction begin() throws TransactionException {
         AbstractTransaction<? extends CellId> tx =
                 transactionFactory.createTransaction(startTimestamp, this);
         try {
-            //事务开始后执行的自定义操作
+            //事务开始后执行的自定义操作	
             postBegin(tx);
-        } catch (TransactionManagerException e) {
+        } catch (TransactionManagerException e) {	
             LOG.warn(e.getMessage());
         }
         return tx;
@@ -173,8 +177,9 @@ public final void commit(Transaction transaction)
         tx.setStatus(Status.COMMITTED);
         tx.setCommitTimestamp(commitTs);
         try {
-            updateShadowCells(tx);//更新shadowCell
-            // Remove transaction from commit table if not failure occurred
+          	//更新shadowCell
+            updateShadowCells(tx);
+            //将DeleteRequest放入队列，异步发送
             commitTableClient.completeTransaction(tx.getStartTimestamp()).get();
             postCommit(tx);
         } catch (TransactionManagerException e) {
@@ -201,6 +206,8 @@ public final void commit(Transaction transaction)
 ## 处理请求入口
 
 内部逻辑主要是借助Disruptor，通过事件驱动机制来实现的
+
+TSO-Server的高可用借助Zookeeper保证
 
 com.yahoo.omid.tso.TSOHandler#messageReceived
 
@@ -297,6 +304,61 @@ public void handleTimestamp(Channel c) {
 }
 ```
 
+```java
+public TimestampOracleImpl(MetricsRegistry metrics,
+                           TimestampStorage tsStorage,
+                           Panicker panicker) throws IOException {
+  	//存放时间戳的介质
+    this.storage = tsStorage; 
+    this.panicker = panicker;
+  	//已经分配的最大时间戳
+    this.lastTimestamp = this.maxTimestamp = tsStorage.getMaxTimestamp();
+ 	 //时间戳预先分配任务
+    this.allocateTimestampsBatchTask = new AllocateTimestampBatchTask(lastTimestamp);
+
+    // 触发第一个时间戳分配
+    executor.execute(allocateTimestampsBatchTask);
+
+    metrics.gauge(name("tso", "maxTimestamp"), new Gauge<Long>() {
+        @Override
+        public Long getValue() {
+            return maxTimestamp;
+        }
+    });
+    LOG.info("Initializing timestamp oracle with timestamp {}", this.lastTimestamp);
+}
+```
+
+com.yahoo.omid.tso.TimestampOracleImpl#next
+
+```java
+//获取时间戳，不会有时钟后退
+public long next() throws IOException {
+    lastTimestamp++;
+		
+    //预先分配的时间戳消耗尽了
+    if (lastTimestamp == nextAllocationThreshold) {
+        executor.execute(allocateTimestampsBatchTask);
+    }
+		//maxTimestamp：存储介质存放的最大时间戳
+    if (lastTimestamp >= maxTimestamp) {
+        assert(maxTimestamp <= maxAllocatedTimestamp);
+      //maxAllocatedTimestamp是volatile修饰的，预先分配时间戳时
+      //先修改maxAllocatedTimestamp,再赋值给maxTimestamp
+        while(maxAllocatedTimestamp == maxTimestamp) {
+            // spin 自旋，直到分配新的时间戳
+        }
+        assert(maxAllocatedTimestamp > maxTimestamp);
+        maxTimestamp = maxAllocatedTimestamp;
+        nextAllocationThreshold = maxTimestamp - TIMESTAMP_REMAINING_THRESHOLD;
+        assert(nextAllocationThreshold > lastTimestamp && nextAllocationThreshold < maxTimestamp);
+        assert(lastTimestamp < maxTimestamp);
+    }
+
+    return lastTimestamp;
+}
+```
+
 传递TIMESTAMP事件
 
 com.yahoo.omid.tso.PersistenceProcessorImpl#persistTimestamp
@@ -328,7 +390,8 @@ public long handleCommit(long startTimestamp, Iterable<Long> writeSet, boolean i
         committed = true;
         for (long cellId : writeSet) {
             long value = hashmap.getLatestWriteForCell(cellId);
-            if (value != 0 && value >= startTimestamp) { //提交的时间戳大于等于开始时间戳，表明其他事务对此cell有修改
+         	 //提交的时间戳大于等于开始时间戳，表明其他事务对此cell有修改
+            if (value != 0 && value >= startTimestamp) { 
                 committed = false;
                 break;
             }
