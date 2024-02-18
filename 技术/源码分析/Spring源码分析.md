@@ -1381,7 +1381,54 @@ protected Object doCreateBean(final String beanName, final RootBeanDefinition mb
 }
 ```
 
-# AOP
+# 如何使用AOP?
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Import(AspectJAutoProxyRegistrar.class)
+public @interface EnableAspectJAutoProxy {
+   boolean proxyTargetClass() default false;
+   boolean exposeProxy() default false;
+}
+```
+
+```
+AspectJAutoProxyRegistrar实现接口ImportBeanDefinitionRegistrar的registerBeanDefinitions方法
+，此方法的调用入口在ConfigurationClassPostProcessor中，又实现了BeanFactoryPostProcessor
+```
+
+org.springframework.context.annotation.AspectJAutoProxyRegistrar#registerBeanDefinitions
+
+```java
+@Override
+public void registerBeanDefinitions(
+      AnnotationMetadata importingClassMetadata, BeanDefinitionRegistry registry) {
+	//向registry注册AnnotationAwareAspectJAutoProxyCreator
+   AopConfigUtils.registerAspectJAnnotationAutoProxyCreatorIfNecessary(registry);
+
+   AnnotationAttributes enableAspectJAutoProxy =
+         AnnotationConfigUtils.attributesFor(importingClassMetadata, EnableAspectJAutoProxy.class);
+   if (enableAspectJAutoProxy != null) {
+      if (enableAspectJAutoProxy.getBoolean("proxyTargetClass")) {
+         AopConfigUtils.forceAutoProxyCreatorToUseClassProxying(registry);
+      }
+      if (enableAspectJAutoProxy.getBoolean("exposeProxy")) {
+         AopConfigUtils.forceAutoProxyCreatorToExposeProxy(registry);
+      }
+   }
+}
+```
+
+org.springframework.context.annotation.ConfigurationClassBeanDefinitionReader#loadBeanDefinitionsFromRegistrars
+
+```java
+private void loadBeanDefinitionsFromRegistrars(Map<ImportBeanDefinitionRegistrar, AnnotationMetadata> registrars) {
+   registrars.forEach((registrar, metadata) ->
+         registrar.registerBeanDefinitions(metadata, this.registry)); //注册
+}
+```
 
 org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory#applyBeanPostProcessorsAfterInitialization
 
@@ -1406,6 +1453,7 @@ public Object postProcessAfterInitialization(@Nullable Object bean, String beanN
         //检测是否已经创建过代理对象，避免重复创建
         Object cacheKey = this.getCacheKey(bean.getClass(), beanName);
         if (!this.earlyProxyReferences.contains(cacheKey)) {
+          	//没有提前暴露过，如有必要进行包装
             return this.wrapIfNecessary(bean, beanName, cacheKey);
         }
     }
@@ -1422,16 +1470,18 @@ protected Object wrapIfNecessary(Object bean, String beanName, Object cacheKey) 
         return bean;
     } else if (Boolean.FALSE.equals(this.advisedBeans.get(cacheKey))) {
         return bean;
-    } else if (!this.isInfrastructureClass(bean.getClass()) && !this.shouldSkip(bean.getClass(), beanName)) {
-      //获取所有的Advisor，过滤出适用此bean的Advisor（前置通知、后置通知等等）
+    } else if (!this.isInfrastructureClass(bean.getClass()) && !this.shouldSkip(bean.getClass(), beanName)) {//过滤掉不会代理的class
+      	//获取所有的Advisor，过滤出适用此bean的Advisor（前置通知、后置通知等等）
         Object[] specificInterceptors = this.getAdvicesAndAdvisorsForBean(bean.getClass(), beanName, (TargetSource)null);
-        if (specificInterceptors != DO_NOT_PROXY) { //Advisor不为空
+        if (specificInterceptors != DO_NOT_PROXY) { 
+          	//Advisor不为空才会被代理
             this.advisedBeans.put(cacheKey, Boolean.TRUE);
           //创建代理对象
             Object proxy = this.createProxy(bean.getClass(), beanName, specificInterceptors, new SingletonTargetSource(bean));
             this.proxyTypes.put(cacheKey, proxy.getClass());
             return proxy;
-        } else { //Advisor为空，不需要创建代理
+        } else { 
+          	//Advisor为空，不需要创建代理
             this.advisedBeans.put(cacheKey, Boolean.FALSE);
             return bean;
         }
@@ -1455,8 +1505,10 @@ org.springframework.aop.framework.autoproxy.AbstractAdvisorAutoProxyCreator#find
 
 ```java
 protected List<Advisor> findEligibleAdvisors(Class<?> beanClass, String beanName) {
-    List<Advisor> candidateAdvisors = this.findCandidateAdvisors(); //获取所有的Advisor
-    List<Advisor> eligibleAdvisors = this.findAdvisorsThatCanApply(candidateAdvisors, beanClass, beanName);//获取对beanClass适用的Advisor
+  	//获取所有的Advisor
+    List<Advisor> candidateAdvisors = this.findCandidateAdvisors(); 
+  	//获取对beanClass适用的Advisor
+    List<Advisor> eligibleAdvisors = this.findAdvisorsThatCanApply(candidateAdvisors, beanClass, beanName);
     this.extendAdvisors(eligibleAdvisors);
     if (!eligibleAdvisors.isEmpty()) {
         eligibleAdvisors = this.sortAdvisors(eligibleAdvisors); //排序
@@ -1466,27 +1518,26 @@ protected List<Advisor> findEligibleAdvisors(Class<?> beanClass, String beanName
 }
 ```
 
-获取Advisor
-
 org.springframework.aop.aspectj.annotation.AnnotationAwareAspectJAutoProxyCreator#findCandidateAdvisors
 
 ```java
 protected List<Advisor> findCandidateAdvisors() {
-    List<Advisor> advisors = super.findCandidateAdvisors(); //获取实现Advisor的Bean
+  	//获取实现Advisor的Bean
+    List<Advisor> advisors = super.findCandidateAdvisors(); 
     if (this.aspectJAdvisorsBuilder != null) {
-        advisors.addAll(this.aspectJAdvisorsBuilder.buildAspectJAdvisors()); //解析Aspect注解的类，获取Advisor
+       	//解析Aspect注解的类，获取Advisor
+        advisors.addAll(this.aspectJAdvisorsBuilder.buildAspectJAdvisors());
     }
 
     return advisors;
 }
 ```
 
-获取实现Advisor的Bean
-
 org.springframework.aop.framework.autoproxy.AbstractAdvisorAutoProxyCreator#findCandidateAdvisors
 
 ```java
 protected List<Advisor> findCandidateAdvisors() {
+  //获取实现Advisor接口的Bean
     Assert.state(this.advisorRetrievalHelper != null, "No BeanFactoryAdvisorRetrievalHelper available");
     return this.advisorRetrievalHelper.findAdvisorBeans();
 }
@@ -1563,7 +1614,7 @@ public List<Advisor> buildAspectJAdvisors() {
                 for(int var7 = 0; var7 < var19; ++var7) {
                     String beanName = var18[var7];
                     if (this.isEligibleBean(beanName)) {
-                       //被注有Aspect、字段名称没有以ajc$开头
+                       //标有@Aspect、字段名称没有以ajc$开头的Class
                         Class<?> beanType = this.beanFactory.getType(beanName);
                         if (beanType != null && this.advisorFactory.isAspect(beanType)) {
                             aspectNames.add(beanName);
@@ -1616,6 +1667,48 @@ public List<Advisor> buildAspectJAdvisors() {
 
         return advisors;
     }
+}
+```
+
+org.springframework.aop.aspectj.annotation.ReflectiveAspectJAdvisorFactory#getAdvisors
+
+```java
+public List<Advisor> getAdvisors(MetadataAwareAspectInstanceFactory aspectInstanceFactory) {
+  //标有@Aspect的类
+    Class<?> aspectClass = aspectInstanceFactory.getAspectMetadata().getAspectClass();
+  //切面名称
+    String aspectName = aspectInstanceFactory.getAspectMetadata().getAspectName();
+    this.validate(aspectClass);
+    MetadataAwareAspectInstanceFactory lazySingletonAspectInstanceFactory = new LazySingletonAspectInstanceFactoryDecorator(aspectInstanceFactory);
+    List<Advisor> advisors = new ArrayList();
+  //获取标有@PointCut的方法
+    Iterator var6 = this.getAdvisorMethods(aspectClass).iterator();
+
+    while(var6.hasNext()) {
+        Method method = (Method)var6.next();
+        Advisor advisor = this.getAdvisor(method, lazySingletonAspectInstanceFactory, advisors.size(), aspectName);
+        if (advisor != null) {
+            advisors.add(advisor);
+        }
+    }
+
+    if (!advisors.isEmpty() && lazySingletonAspectInstanceFactory.getAspectMetadata().isLazilyInstantiated()) {
+        Advisor instantiationAdvisor = new ReflectiveAspectJAdvisorFactory.SyntheticInstantiationAdvisor(lazySingletonAspectInstanceFactory);
+        advisors.add(0, instantiationAdvisor);
+    }
+
+    Field[] var12 = aspectClass.getDeclaredFields();
+    int var13 = var12.length;
+
+    for(int var14 = 0; var14 < var13; ++var14) {
+        Field field = var12[var14];
+        Advisor advisor = this.getDeclareParentsAdvisor(field);
+        if (advisor != null) {
+            advisors.add(advisor);
+        }
+    }
+
+    return advisors;
 }
 ```
 
@@ -1863,9 +1956,7 @@ public Object proceed() throws Throwable {
 }
 ```
 
-# 声明式事务
-
-## @EnableTransactionManagement
+# 如何使用事务？
 
 在 Spring 的配置类上添加 @EnableTransactionManagement 注解即可开启事务
 
@@ -1883,8 +1974,6 @@ public @interface EnableTransactionManagement {
 }
 ```
 
-## TransactionManagementConfigurationSelector
-
 org.springframework.transaction.annotation.TransactionManagementConfigurationSelector#selectImports
 
 ```java
@@ -1899,8 +1988,6 @@ protected String[] selectImports(AdviceMode adviceMode) {
     }
 }
 ```
-
-AutoProxyRegistrar
 
 org.springframework.context.annotation.AutoProxyRegistrar#registerBeanDefinitions
 
@@ -1919,7 +2006,7 @@ public void registerBeanDefinitions(AnnotationMetadata importingClassMetadata, B
             if (mode != null && proxyTargetClass != null && AdviceMode.class == mode.getClass() && Boolean.class == proxyTargetClass.getClass()) {
                 candidateFound = true;
                 if (mode == AdviceMode.PROXY) {
-                    //注册AutoProxyCreator
+                    //注册InfrastructureAdvisorAutoProxyCreator到BeanDefinitionRegistry
                     AopConfigUtils.registerAutoProxyCreatorIfNecessary(registry);
                     if ((Boolean)proxyTargetClass) {
                         AopConfigUtils.forceAutoProxyCreatorToUseClassProxying(registry);
@@ -1946,6 +2033,51 @@ public static BeanDefinition registerAutoProxyCreatorIfNecessary(BeanDefinitionR
 }
 ```
 
+```java
+private static BeanDefinition registerOrEscalateApcAsRequired(Class<?> cls, BeanDefinitionRegistry registry, @Nullable Object source) {
+    Assert.notNull(registry, "BeanDefinitionRegistry must not be null");
+    if (registry.containsBeanDefinition("org.springframework.aop.config.internalAutoProxyCreator")) {
+        BeanDefinition apcDefinition = registry.getBeanDefinition("org.springframework.aop.config.internalAutoProxyCreator");
+        if (!cls.getName().equals(apcDefinition.getBeanClassName())) {
+          //比较优先级，在APC_PRIORITY_LIST中越靠后，优先级越高
+            int currentPriority = findPriorityForClass(apcDefinition.getBeanClassName());
+            int requiredPriority = findPriorityForClass(cls);
+            if (currentPriority < requiredPriority) {
+                apcDefinition.setBeanClassName(cls.getName());
+            }
+        }
+
+        return null;
+    } else {
+        RootBeanDefinition beanDefinition = new RootBeanDefinition(cls);
+        beanDefinition.setSource(source);
+        beanDefinition.getPropertyValues().add("order", -2147483648);
+        beanDefinition.setRole(2);
+        registry.registerBeanDefinition("org.springframework.aop.config.internalAutoProxyCreator", beanDefinition);
+        return beanDefinition;
+    }
+}
+```
+
+```java
+private static int findPriorityForClass(@Nullable String className) {
+    for(int i = 0; i < APC_PRIORITY_LIST.size(); ++i) {
+        Class<?> clazz = (Class)APC_PRIORITY_LIST.get(i);
+        if (clazz.getName().equals(className)) {
+            return i;
+        }
+    }
+
+    throw new IllegalArgumentException("Class name [" + className + "] is not a known auto-proxy creator class");
+}
+
+static {
+    APC_PRIORITY_LIST.add(InfrastructureAdvisorAutoProxyCreator.class);
+    APC_PRIORITY_LIST.add(AspectJAwareAdvisorAutoProxyCreator.class);
+    APC_PRIORITY_LIST.add(AnnotationAwareAspectJAutoProxyCreator.class);
+}
+```
+
 ## ProxyTransactionManagementConfiguration
 
 BeanFactoryTransactionAttributeSourceAdvisor
@@ -1956,9 +2088,12 @@ BeanFactoryTransactionAttributeSourceAdvisor
 )
 @Role(2)
 public BeanFactoryTransactionAttributeSourceAdvisor transactionAdvisor() {
+   //对拦截器、事务属性解析器的封装
     BeanFactoryTransactionAttributeSourceAdvisor advisor = new BeanFactoryTransactionAttributeSourceAdvisor();
+   //事务属性解析
     advisor.setTransactionAttributeSource(this.transactionAttributeSource());
-    advisor.setAdvice(this.transactionInterceptor()); //拦截器
+  	//拦截器，执行具体方法
+    advisor.setAdvice(this.transactionInterceptor()); 
     if (this.enableTx != null) {
         advisor.setOrder((Integer)this.enableTx.getNumber("order"));
     }
@@ -1967,8 +2102,6 @@ public BeanFactoryTransactionAttributeSourceAdvisor transactionAdvisor() {
 }
 ```
 
-TransactionAttributeSource
-
 ```java
 @Bean
 @Role(2)
@@ -1976,8 +2109,6 @@ public TransactionAttributeSource transactionAttributeSource() {//解析事务�
     return new AnnotationTransactionAttributeSource();
 }
 ```
-
-TransactionInterceptor
 
 ```java
 @Bean
@@ -1993,7 +2124,21 @@ public TransactionInterceptor transactionInterceptor() {//对标有Transactional
 }
 ```
 
+org.springframework.transaction.annotation.AbstractTransactionManagementConfiguration#setConfigurers
 
+```java
+@Autowired(required = false)
+void setConfigurers(Collection<TransactionManagementConfigurer> configurers) {
+   if (CollectionUtils.isEmpty(configurers)) {
+      return;
+   }
+   if (configurers.size() > 1) {
+      throw new IllegalStateException("Only one TransactionManagementConfigurer may exist");
+   }
+   TransactionManagementConfigurer configurer = configurers.iterator().next();
+   this.txManager = configurer.annotationDrivenTransactionManager();
+}
+```
 
 事务执行
 
@@ -2011,85 +2156,195 @@ public Object invoke(MethodInvocation invocation) throws Throwable {
 org.springframework.transaction.interceptor.TransactionAspectSupport#invokeWithinTransaction
 
 ```java
-protected Object invokeWithinTransaction(Method method, @Nullable Class<?> targetClass, TransactionAspectSupport.InvocationCallback invocation) throws Throwable {
-   //获取事务属性解析器
-    TransactionAttributeSource tas = this.getTransactionAttributeSource();
-   //获取事务属性
-    TransactionAttribute txAttr = tas != null ? tas.getTransactionAttribute(method, targetClass) : null;
-  //获取事务管理器
-    PlatformTransactionManager tm = this.determineTransactionManager(txAttr);
-    String joinpointIdentification = this.methodIdentification(method, targetClass, txAttr);
-    Object result;
-    if (txAttr != null && tm instanceof CallbackPreferringPlatformTransactionManager) {
-        TransactionAspectSupport.ThrowableHolder throwableHolder = new TransactionAspectSupport.ThrowableHolder();
+	protected Object invokeWithinTransaction(Method method, @Nullable Class<?> targetClass,
+			final InvocationCallback invocation) throws Throwable {
 
-        try {
-            result = ((CallbackPreferringPlatformTransactionManager)tm).execute(txAttr, (status) -> {
-                TransactionAspectSupport.TransactionInfo txInfo = this.prepareTransactionInfo(tm, txAttr, joinpointIdentification, status);
+		// 获取事务信息
+		TransactionAttributeSource tas = getTransactionAttributeSource();
+    //RuleBasedTransactionAttribute
+		final TransactionAttribute txAttr = (tas != null ? tas.getTransactionAttribute(method, targetClass) : null);
+    //事务管理器
+		final PlatformTransactionManager tm = determineTransactionManager(txAttr);
+		final String joinpointIdentification = methodIdentification(method, targetClass, txAttr);
 
-                Object var9;
-                try {
-                    Object var8 = invocation.proceedWithInvocation();
-                    return var8;
-                } catch (Throwable var13) {
-                    if (txAttr.rollbackOn(var13)) {
-                        if (var13 instanceof RuntimeException) {
-                            throw (RuntimeException)var13;
-                        }
+		if (txAttr == null || !(tm instanceof CallbackPreferringPlatformTransactionManager)) {
+			TransactionInfo txInfo = createTransactionIfNecessary(tm, txAttr, joinpointIdentification);
 
-                        throw new TransactionAspectSupport.ThrowableHolderException(var13);
-                    }
+			Object retVal;
+			try {
+				retVal = invocation.proceedWithInvocation();
+			}
+			catch (Throwable ex) {
+        //对异常的处理
+				completeTransactionAfterThrowing(txInfo, ex);
+				throw ex;
+			}
+			finally {
+				cleanupTransactionInfo(txInfo);
+			}
+      //提交事务
+			commitTransactionAfterReturning(txInfo); 
+			return retVal;
+		}
+  }
+```
 
-                    throwableHolder.throwable = var13;
-                    var9 = null;
-                } finally {
-                    this.cleanupTransactionInfo(txInfo);
-                }
-
-                return var9;
-            });
-            if (throwableHolder.throwable != null) {
-                throw throwableHolder.throwable;
-            } else {
-                return result;
-            }
-        } catch (TransactionAspectSupport.ThrowableHolderException var19) {
-            throw var19.getCause();
-        } catch (TransactionSystemException var20) {
-            if (throwableHolder.throwable != null) {
-                this.logger.error("Application exception overridden by commit exception", throwableHolder.throwable);
-                var20.initApplicationException(throwableHolder.throwable);
-            }
-
-            throw var20;
-        } catch (Throwable var21) {
-            if (throwableHolder.throwable != null) {
-                this.logger.error("Application exception overridden by commit exception", throwableHolder.throwable);
-            }
-
-            throw var21;
-        }
-    } else {
-        TransactionAspectSupport.TransactionInfo txInfo = this.createTransactionIfNecessary(tm, txAttr, joinpointIdentification);
-        result = null;
-
-        try {
-            result = invocation.proceedWithInvocation();
-        } catch (Throwable var17) {
-           //事务发生异常，回滚
-            this.completeTransactionAfterThrowing(txInfo, var17);
-            throw var17;
-        } finally {
-            this.cleanupTransactionInfo(txInfo);
-        }
-				//事务执行正常，提交
-        this.commitTransactionAfterReturning(txInfo);
-        return result;
-    }
+```java
+protected void completeTransactionAfterThrowing(@Nullable TransactionInfo txInfo, Throwable ex) {
+   if (txInfo != null && txInfo.getTransactionStatus() != null) {
+      if (logger.isTraceEnabled()) {
+         logger.trace("Completing transaction for [" + txInfo.getJoinpointIdentification() +
+               "] after exception: " + ex);
+      }
+     //事务属性不为空，并且设置了回滚的异常跟实际发生的异常相匹配
+      if (txInfo.transactionAttribute != null && txInfo.transactionAttribute.rollbackOn(ex)) {
+         try {
+            txInfo.getTransactionManager().rollback(txInfo.getTransactionStatus());
+         }
+         catch (TransactionSystemException ex2) {
+            logger.error("Application exception overridden by rollback exception", ex);
+            ex2.initApplicationException(ex);
+            throw ex2;
+         }
+         catch (RuntimeException | Error ex2) {
+            logger.error("Application exception overridden by rollback exception", ex);
+            throw ex2;
+         }
+      }
+      else {
+         // We don't roll back on this exception.
+         // Will still roll back if TransactionStatus.isRollbackOnly() is true.
+         try {
+            txInfo.getTransactionManager().commit(txInfo.getTransactionStatus());
+         }
+         catch (TransactionSystemException ex2) {
+            logger.error("Application exception overridden by commit exception", ex);
+            ex2.initApplicationException(ex);
+            throw ex2;
+         }
+         catch (RuntimeException | Error ex2) {
+            logger.error("Application exception overridden by commit exception", ex);
+            throw ex2;
+         }
+      }
+   }
 }
 ```
 
-创建TransactionInfo
+```java
+public boolean rollbackOn(Throwable ex) {
+   if (logger.isTraceEnabled()) {
+      logger.trace("Applying rules to determine whether transaction should rollback on " + ex);
+   }
+
+   RollbackRuleAttribute winner = null;
+   int deepest = Integer.MAX_VALUE;
+
+   if (this.rollbackRules != null) {
+      for (RollbackRuleAttribute rule : this.rollbackRules) {
+         int depth = rule.getDepth(ex);
+         if (depth >= 0 && depth < deepest) {
+            deepest = depth;
+            winner = rule;
+         }
+      }
+   }
+
+   if (logger.isTraceEnabled()) {
+      logger.trace("Winning rollback rule is: " + winner);
+   }
+
+   // User superclass behavior (rollback on unchecked) if no rule matches.
+   if (winner == null) {
+      logger.trace("No relevant rollback rule found: applying default rules");
+      return super.rollbackOn(ex);
+   }
+
+   return !(winner instanceof NoRollbackRuleAttribute);
+}
+```
+
+```java
+public boolean rollbackOn(Throwable ex) {//默认只有出现了RuntimeException、Error才回滚
+   return (ex instanceof RuntimeException || ex instanceof Error);
+}
+```
+
+```java
+public final void rollback(TransactionStatus status) throws TransactionException {
+   if (status.isCompleted()) {
+      throw new IllegalTransactionStateException(
+            "Transaction is already completed - do not call commit or rollback more than once per transaction");
+   }
+
+   DefaultTransactionStatus defStatus = (DefaultTransactionStatus) status;
+   processRollback(defStatus, false);
+}
+```
+
+```java
+private void processRollback(DefaultTransactionStatus status, boolean unexpected) {
+   try {
+      boolean unexpectedRollback = unexpected;
+
+      try {
+         triggerBeforeCompletion(status);
+
+        
+         if (status.hasSavepoint()) { //回滚保存点
+            if (status.isDebug()) {
+               logger.debug("Rolling back transaction to savepoint");
+            }
+            status.rollbackToHeldSavepoint();
+         }
+         else if (status.isNewTransaction()) { //回滚事务
+            if (status.isDebug()) {
+               logger.debug("Initiating transaction rollback");
+            }
+            doRollback(status);
+         }
+         else {
+            // Participating in larger transaction
+            if (status.hasTransaction()) {
+               if (status.isLocalRollbackOnly() || isGlobalRollbackOnParticipationFailure()) {
+                  if (status.isDebug()) {
+                     logger.debug("Participating transaction failed - marking existing transaction as rollback-only");
+                  }
+                  doSetRollbackOnly(status);
+               }
+               else {
+                  if (status.isDebug()) {
+                     logger.debug("Participating transaction failed - letting transaction originator decide on rollback");
+                  }
+               }
+            }
+            else {
+               logger.debug("Should roll back transaction but cannot - no transaction available");
+            }
+            // Unexpected rollback only matters here if we're asked to fail early
+            if (!isFailEarlyOnGlobalRollbackOnly()) {
+               unexpectedRollback = false;
+            }
+         }
+      }
+      catch (RuntimeException | Error ex) {
+         triggerAfterCompletion(status, TransactionSynchronization.STATUS_UNKNOWN);
+         throw ex;
+      }
+
+      triggerAfterCompletion(status, TransactionSynchronization.STATUS_ROLLED_BACK);
+
+      // Raise UnexpectedRollbackException if we had a global rollback-only marker
+      if (unexpectedRollback) {
+         throw new UnexpectedRollbackException(
+               "Transaction rolled back because it has been marked as rollback-only");
+      }
+   }
+   finally {
+      cleanupAfterCompletion(status);
+   }
+}
+```
 
 org.springframework.transaction.interceptor.TransactionAspectSupport#createTransactionIfNecessary
 
@@ -2174,7 +2429,6 @@ protected Object doGetTransaction() {
 ```
 
 ```
-int PROPAGATION_REQUIRED = 0;
 int PROPAGATION_SUPPORTS = 1;
 int PROPAGATION_MANDATORY = 2;
 int PROPAGATION_REQUIRES_NEW = 3;
@@ -2189,1077 +2443,276 @@ int ISOLATION_SERIALIZABLE = 8;
 int TIMEOUT_DEFAULT = -1;
 ```
 
-# SpringMVC
 
-## 加载默认实现
-
-org.springframework.web.servlet.DispatcherServlet
 
 ```java
-static {
-   // Load default strategy implementations from properties file.
-   // This is currently strictly internal and not meant to be customized
-   // by application developers.
-   try {
-      ClassPathResource resource = new ClassPathResource(DEFAULT_STRATEGIES_PATH, DispatcherServlet.class);//DispatcherServlet.properties
-      defaultStrategies = PropertiesLoaderUtils.loadProperties(resource);
-   }
-   catch (IOException ex) {
-      throw new IllegalStateException("Could not load '" + DEFAULT_STRATEGIES_PATH + "': " + ex.getMessage());
-   }
-}
-```
+protected ModelAndView processHandlerException(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+    ModelAndView exMv = null;
+    Iterator var6 = this.handlerExceptionResolvers.iterator();
+//可实现HandlerExceptionResolver接口，实现resolveException返回ModelAndView
+    while(var6.hasNext()) {
+        HandlerExceptionResolver handlerExceptionResolver = (HandlerExceptionResolver)var6.next();
+        exMv = handlerExceptionResolver.resolveException(request, response, handler, ex);
+        if (exMv != null) {
+            break;
+        }
+    }
 
-DispatcherServlet.properties
-
-```properties
-org.springframework.web.servlet.LocaleResolver=org.springframework.web.servlet.i18n.AcceptHeaderLocaleResolver
-
-org.springframework.web.servlet.ThemeResolver=org.springframework.web.servlet.theme.FixedThemeResolver
-
-org.springframework.web.servlet.HandlerMapping=org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping,\
-   org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping
-
-org.springframework.web.servlet.HandlerAdapter=org.springframework.web.servlet.mvc.HttpRequestHandlerAdapter,\
-   org.springframework.web.servlet.mvc.SimpleControllerHandlerAdapter,\
-   org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter
-
-org.springframework.web.servlet.HandlerExceptionResolver=org.springframework.web.servlet.mvc.method.annotation.ExceptionHandlerExceptionResolver,\
-   org.springframework.web.servlet.mvc.annotation.ResponseStatusExceptionResolver,\
-   org.springframework.web.servlet.mvc.support.DefaultHandlerExceptionResolver
-
-org.springframework.web.servlet.RequestToViewNameTranslator=org.springframework.web.servlet.view.DefaultRequestToViewNameTranslator
-
-org.springframework.web.servlet.ViewResolver=org.springframework.web.servlet.view.InternalResourceViewResolver
-
-org.springframework.web.servlet.FlashMapManager=org.springframework.web.servlet.support.SessionFlashMapManager
-```
-
-## 创建springmvc容器
-
-org.springframework.web.servlet.FrameworkServlet#initServletBean
-
-```java
-protected final void initServletBean() throws ServletException {
-   getServletContext().log("Initializing Spring FrameworkServlet '" + getServletName() + "'");
-   if (this.logger.isInfoEnabled()) {
-      this.logger.info("FrameworkServlet '" + getServletName() + "': initialization started");
-   }
-   long startTime = System.currentTimeMillis();
-
-   try {
-     //创建springmvc容器，
-      this.webApplicationContext = initWebApplicationContext();
-      initFrameworkServlet();
-   }
-   catch (ServletException | RuntimeException ex) {
-      this.logger.error("Context initialization failed", ex);
-      throw ex;
-   }
-
-   if (this.logger.isInfoEnabled()) {
-      long elapsedTime = System.currentTimeMillis() - startTime;
-      this.logger.info("FrameworkServlet '" + getServletName() + "': initialization completed in " +
-            elapsedTime + " ms");
-   }
-}
-```
-
-org.springframework.web.servlet.FrameworkServlet#initWebApplicationContext
-
-```java
-protected WebApplicationContext initWebApplicationContext() {
-   WebApplicationContext rootContext =
-         WebApplicationContextUtils.getWebApplicationContext(getServletContext());//父容器
-   WebApplicationContext wac = null;
-
-   if (this.webApplicationContext != null) { //在构造器中已经注入
-      // A context instance was injected at construction time -> use it
-      wac = this.webApplicationContext;
-      if (wac instanceof ConfigurableWebApplicationContext) {
-         ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) wac;
-         if (!cwac.isActive()) { //尚未执行refreshed方法
-            if (cwac.getParent() == null) {
-               cwac.setParent(rootContext); //设置父容器
+    if (exMv != null) {
+        if (exMv.isEmpty()) {
+            request.setAttribute(EXCEPTION_ATTRIBUTE, ex);
+            return null;
+        } else {
+            if (!exMv.hasView()) {
+                exMv.setViewName(this.getDefaultViewName(request));
             }
-            configureAndRefreshWebApplicationContext(cwac); //执行refreshed
+
+            if (this.logger.isDebugEnabled()) {
+                this.logger.debug("Handler execution resulted in exception - forwarding to resolved error view: " + exMv, ex);
+            }
+
+            WebUtils.exposeErrorRequestAttributes(request, ex, this.getServletName());
+            return exMv;
+        }
+    } else {
+        throw ex;
+    }
+}
+```
+
+
+
+org.springframework.context.annotation.ConfigurationClassParser#doProcessConfigurationClass
+
+```java
+// Process any @ImportResource annotations
+AnnotationAttributes importResource =
+      AnnotationConfigUtils.attributesFor(sourceClass.getMetadata(), ImportResource.class);
+if (importResource != null) {
+   String[] resources = importResource.getStringArray("locations");
+   Class<? extends BeanDefinitionReader> readerClass = importResource.getClass("reader");
+   for (String resource : resources) {
+      String resolvedResource = this.environment.resolveRequiredPlaceholders(resource);
+      configClass.addImportedResource(resolvedResource, readerClass);
+   }
+}
+```
+
+```java
+loadBeanDefinitionsFromImportedResources(configClass.getImportedResources());
+```
+
+org.springframework.context.annotation.ConfigurationClassBeanDefinitionReader#loadBeanDefinitionsFromImportedResources
+
+```java
+private void loadBeanDefinitionsFromImportedResources(
+      Map<String, Class<? extends BeanDefinitionReader>> importedResources) {
+
+   Map<Class<?>, BeanDefinitionReader> readerInstanceCache = new HashMap<>();
+
+   importedResources.forEach((resource, readerClass) -> {
+      // Default reader selection necessary?
+      if (BeanDefinitionReader.class == readerClass) {
+         if (StringUtils.endsWithIgnoreCase(resource, ".groovy")) {
+            // When clearly asking for Groovy, that's what they'll get...
+            readerClass = GroovyBeanDefinitionReader.class;
+         }
+         else {
+            // Primarily ".xml" files but for any other extension as well
+            readerClass = XmlBeanDefinitionReader.class;
          }
       }
-   }
-   if (wac == null) {
-     //从ServletContext中获取springmvc容器
-      wac = findWebApplicationContext();
-   }
-   if (wac == null) { //创建springmvc容器
-      wac = createWebApplicationContext(rootContext);
-   }
 
-   if (!this.refreshEventReceived) {
-      onRefresh(wac);
-   }
-
-   if (this.publishContext) {
-      // Publish the context as a servlet context attribute.
-      String attrName = getServletContextAttributeName();
-      getServletContext().setAttribute(attrName, wac);
-      if (this.logger.isDebugEnabled()) {
-         this.logger.debug("Published WebApplicationContext of servlet '" + getServletName() +
-               "' as ServletContext attribute with name [" + attrName + "]");
-      }
-   }
-
-   return wac;
-}
-```
-
-org.springframework.web.servlet.FrameworkServlet#createWebApplicationContext(org.springframework.web.context.WebApplicationContext)
-
-```java
-protected WebApplicationContext createWebApplicationContext(@Nullable WebApplicationContext parent) {
-   return createWebApplicationContext((ApplicationContext) parent);
-}
-```
-
-org.springframework.web.servlet.FrameworkServlet#createWebApplicationContext(org.springframework.context.ApplicationContext)
-
-```java
-protected WebApplicationContext createWebApplicationContext(@Nullable ApplicationContext parent) {
-   Class<?> contextClass = getContextClass();//默认XmlWebApplicationContext
-   if (this.logger.isDebugEnabled()) {
-      this.logger.debug("Servlet with name '" + getServletName() +
-            "' will try to create custom WebApplicationContext context of class '" +
-            contextClass.getName() + "'" + ", using parent context [" + parent + "]");
-   }
-   if (!ConfigurableWebApplicationContext.class.isAssignableFrom(contextClass)) {
-      throw new ApplicationContextException(
-            "Fatal initialization error in servlet with name '" + getServletName() +
-            "': custom WebApplicationContext class [" + contextClass.getName() +
-            "] is not of type ConfigurableWebApplicationContext");
-   }
-  //创建XmlWebApplicationContext
-   ConfigurableWebApplicationContext wac =
-         (ConfigurableWebApplicationContext) BeanUtils.instantiateClass(contextClass);
-
-   wac.setEnvironment(getEnvironment()); //StandardServletEnvironment
-   wac.setParent(parent); //设置父容器
-   String configLocation = getContextConfigLocation(); //springmvc.xml
-   if (configLocation != null) {
-      wac.setConfigLocation(configLocation);
-   }
-   configureAndRefreshWebApplicationContext(wac); //初始化springmvc容器
-   return wac;
-}
-```
-
-org.springframework.web.servlet.DispatcherServlet#onRefresh
-
-```java
-protected void onRefresh(ApplicationContext context) {
-   initStrategies(context); //初始化策略
-}
-```
-
-## 初始化策略
-
-org.springframework.web.servlet.DispatcherServlet#initStrategies
-
-```java
-protected void initStrategies(ApplicationContext context) {
-   initMultipartResolver(context); //初始化文件上传解析器
-   initLocaleResolver(context); //初始化本地语言环境
-   initThemeResolver(context); //初始化模板解析器
-   initHandlerMappings(context); //初始化HandlerMapping
-   initHandlerAdapters(context); //初始化HandlerAdapter
-   initHandlerExceptionResolvers(context); //初始化异常拦截器
-   initRequestToViewNameTranslator(context); //初始化视图预解析器
-   initViewResolvers(context); //初始化视图解析器
-   initFlashMapManager(context); //初始化FlagshMap管理器
-}
-```
-
-### InitHandlerMapping
-
-org.springframework.web.servlet.DispatcherServlet#initHandlerMappings
-
-```java
-private void initHandlerMappings(ApplicationContext context) {
-   this.handlerMappings = null;
-
-   if (this.detectAllHandlerMappings) {//默认true，从容器获取实现HandlerMapping接口的bean
-      // Find all HandlerMappings in the ApplicationContext, including ancestor contexts.
-      Map<String, HandlerMapping> matchingBeans =
-            BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerMapping.class, true, false);
-      if (!matchingBeans.isEmpty()) {
-         this.handlerMappings = new ArrayList<>(matchingBeans.values());
-         // We keep HandlerMappings in sorted order.
-         AnnotationAwareOrderComparator.sort(this.handlerMappings);
-      }
-   }
-   else {
-      try {
-         HandlerMapping hm = context.getBean(HANDLER_MAPPING_BEAN_NAME, HandlerMapping.class);
-         this.handlerMappings = Collections.singletonList(hm);
-      }
-      catch (NoSuchBeanDefinitionException ex) {
-         // Ignore, we'll add a default HandlerMapping later.
-      }
-   }
-
-   if (this.handlerMappings == null) { //容器中未获取到，加载DispatcherServlet.properties配置文件中的HandlerMapping,BeanNameUrlHandlerMapping、RequestMappingHandlerMapping
-      this.handlerMappings = getDefaultStrategies(context, HandlerMapping.class);
-      if (logger.isDebugEnabled()) {
-         logger.debug("No HandlerMappings found in servlet '" + getServletName() + "': using default");
-      }
-   }
-}
-```
-
-### GetDefaultStrategies
-
-org.springframework.web.servlet.DispatcherServlet#getDefaultStrategies
-
-```java
-protected <T> List<T> getDefaultStrategies(ApplicationContext context, Class<T> strategyInterface) { //从配置文件获取默认实现
-   String key = strategyInterface.getName();
-   String value = defaultStrategies.getProperty(key);
-   if (value != null) {
-      String[] classNames = StringUtils.commaDelimitedListToStringArray(value);
-      List<T> strategies = new ArrayList<>(classNames.length);
-      for (String className : classNames) {
+      BeanDefinitionReader reader = readerInstanceCache.get(readerClass);
+      if (reader == null) {
          try {
-            Class<?> clazz = ClassUtils.forName(className, DispatcherServlet.class.getClassLoader());
-            Object strategy = createDefaultStrategy(context, clazz);
-            strategies.add((T) strategy);
-         }
-         catch (ClassNotFoundException ex) {
-            throw new BeanInitializationException(
-                  "Could not find DispatcherServlet's default strategy class [" + className +
-                  "] for interface [" + key + "]", ex);
-         }
-         catch (LinkageError err) {
-            throw new BeanInitializationException(
-                  "Unresolvable class definition for DispatcherServlet's default strategy class [" +
-                  className + "] for interface [" + key + "]", err);
-         }
-      }
-      return strategies;
-   }
-   else {
-      return new LinkedList<>();
-   }
-}
-```
-
-org.springframework.web.servlet.DispatcherServlet#createDefaultStrategy
-
-```java
-protected Object createDefaultStrategy(ApplicationContext context, Class<?> clazz) {
-   return context.getAutowireCapableBeanFactory().createBean(clazz);//容器创建bean
-}
-```
-
-org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory#createBean(java.lang.Class<T>)
-
-```java
-public <T> T createBean(Class<T> beanClass) throws BeansException {
-   // Use prototype bean definition, to avoid registering bean as dependent bean.
-   RootBeanDefinition bd = new RootBeanDefinition(beanClass); //创建BeanDefinition
-   bd.setScope(SCOPE_PROTOTYPE);
-   bd.allowCaching = ClassUtils.isCacheSafe(beanClass, getBeanClassLoader());
-   return (T) createBean(beanClass.getName(), bd, null); //创建bean
-}
-```
-
-### InitHandlerMethods
-
-org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping#afterPropertiesSet
-
-```java
-public void afterPropertiesSet() {
-   this.config = new RequestMappingInfo.BuilderConfiguration();
-   this.config.setUrlPathHelper(getUrlPathHelper());
-   this.config.setPathMatcher(getPathMatcher());
-   this.config.setSuffixPatternMatch(this.useSuffixPatternMatch);
-   this.config.setTrailingSlashMatch(this.useTrailingSlashMatch);
-   this.config.setRegisteredSuffixPatternMatch(this.useRegisteredSuffixPatternMatch);
-   this.config.setContentNegotiationManager(getContentNegotiationManager());
-
-   super.afterPropertiesSet();
-}
-```
-
-org.springframework.web.servlet.handler.AbstractHandlerMethodMapping#afterPropertiesSet
-
-```java
-public void afterPropertiesSet() {
-   initHandlerMethods();
-}
-```
-
-org.springframework.web.servlet.handler.AbstractHandlerMethodMapping#initHandlerMethods
-
-```java
-protected void initHandlerMethods() {
-   if (logger.isDebugEnabled()) {
-      logger.debug("Looking for request mappings in application context: " + getApplicationContext());
-   }
-  //默认只在子容器（springmvc容器）中获取
-   String[] beanNames = (this.detectHandlerMethodsInAncestorContexts ?
-         BeanFactoryUtils.beanNamesForTypeIncludingAncestors(obtainApplicationContext(), Object.class) :
-         obtainApplicationContext().getBeanNamesForType(Object.class));
-
-   for (String beanName : beanNames) {
-      if (!beanName.startsWith(SCOPED_TARGET_NAME_PREFIX)) {
-         Class<?> beanType = null;
-         try {
-           //根据beannanme获取beantype
-            beanType = obtainApplicationContext().getType(beanName);
+            // Instantiate the specified BeanDefinitionReader
+            reader = readerClass.getConstructor(BeanDefinitionRegistry.class).newInstance(this.registry);
+            // Delegate the current ResourceLoader to it if possible
+            if (reader instanceof AbstractBeanDefinitionReader) {
+               AbstractBeanDefinitionReader abdr = ((AbstractBeanDefinitionReader) reader);
+               abdr.setResourceLoader(this.resourceLoader);
+               abdr.setEnvironment(this.environment);
+            }
+            readerInstanceCache.put(readerClass, reader);
          }
          catch (Throwable ex) {
-            // An unresolvable bean type, probably from a lazy bean - let's ignore it.
-            if (logger.isDebugEnabled()) {
-               logger.debug("Could not resolve target class for bean with name '" + beanName + "'", ex);
+            throw new IllegalStateException(
+                  "Could not instantiate BeanDefinitionReader class [" + readerClass.getName() + "]");
+         }
+      }
+
+      // TODO SPR-6310: qualify relative path locations as done in AbstractContextLoader.modifyLocations
+      reader.loadBeanDefinitions(resource);
+   });
+}
+```
+
+```java
+public int loadBeanDefinitions(String location, @Nullable Set<Resource> actualResources) throws BeanDefinitionStoreException {
+    ResourceLoader resourceLoader = this.getResourceLoader();
+    if (resourceLoader == null) {
+        throw new BeanDefinitionStoreException("Cannot load bean definitions from location [" + location + "]: no ResourceLoader available");
+    } else {
+        int count;
+        if (resourceLoader instanceof ResourcePatternResolver) {
+            try {
+                Resource[] resources = ((ResourcePatternResolver)resourceLoader).getResources(location);
+                count = this.loadBeanDefinitions(resources);
+                if (actualResources != null) {
+                    Collections.addAll(actualResources, resources);
+                }
+
+                if (this.logger.isTraceEnabled()) {
+                    this.logger.trace("Loaded " + count + " bean definitions from location pattern [" + location + "]");
+                }
+
+                return count;
+            } catch (IOException var6) {
+                throw new BeanDefinitionStoreException("Could not resolve bean definition resource pattern [" + location + "]", var6);
             }
-         }
-         if (beanType != null && isHandler(beanType)) {
-            detectHandlerMethods(beanName);
-         }
-      }
-   }
-   handlerMethodsInitialized(getHandlerMethods());
-}
-```
-
-## 请求入口
-
-org.springframework.web.servlet.DispatcherServlet#doDispatch
-
-```java
-protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
-   HttpServletRequest processedRequest = request;
-   HandlerExecutionChain mappedHandler = null;
-   boolean multipartRequestParsed = false;
-
-   WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
-
-   try {
-      ModelAndView mv = null;
-      Exception dispatchException = null;
-
-      try {
-        //检测是否是文件上传的请求
-         processedRequest = checkMultipart(request);
-         multipartRequestParsed = (processedRequest != request);
-
-         //取得处理当前请求的Controller
-         mappedHandler = getHandler(processedRequest);
-         if (mappedHandler == null) {
-           // 如果 handler 为空，则返回404
-            noHandlerFound(processedRequest, response);
-            return;
-         }
-
-         // 获取handler适配器,适配三种handler：注有Controller注解、实现HttpRequestHandler接口、实现Controller接口
-         HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
-
-         // Process last-modified header, if supported by the handler.
-         String method = request.getMethod();
-         boolean isGet = "GET".equals(method);
-         if (isGet || "HEAD".equals(method)) {
-            long lastModified = ha.getLastModified(request, mappedHandler.getHandler());
-            if (logger.isDebugEnabled()) {
-               logger.debug("Last-Modified value for [" + getRequestUri(request) + "] is: " + lastModified);
+        } else {
+            Resource resource = resourceLoader.getResource(location);
+            count = this.loadBeanDefinitions((Resource)resource);
+            if (actualResources != null) {
+                actualResources.add(resource);
             }
-            if (new ServletWebRequest(request, response).checkNotModified(lastModified) && isGet) {
-               return;
+
+            if (this.logger.isTraceEnabled()) {
+                this.logger.trace("Loaded " + count + " bean definitions from location [" + location + "]");
             }
-         }
 
-         if (!mappedHandler.applyPreHandle(processedRequest, response)) {
-            return;
-         }
-
-         // 实际处理器处理请求，返回结果视图对象
-         mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
-
-         if (asyncManager.isConcurrentHandlingStarted()) {
-            return;
-         }
-				// 结果视图对象的处理
-         applyDefaultViewName(processedRequest, mv);
-         mappedHandler.applyPostHandle(processedRequest, response, mv);
-      }
-      catch (Exception ex) {
-         dispatchException = ex;
-      }
-      catch (Throwable err) {
-         // As of 4.3, we're processing Errors thrown from handler methods as well,
-         // making them available for @ExceptionHandler methods and other scenarios.
-         dispatchException = new NestedServletException("Handler dispatch failed", err);
-      }
-     // 跳转⻚面，渲染视图
-      processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
-   }
-   catch (Exception ex) {
-     //最终会调用HandlerInterceptor的afterCompletion 方法
-      triggerAfterCompletion(processedRequest, response, mappedHandler, ex);
-   }
-   catch (Throwable err) {
-     //最终会调用HandlerInterceptor的afterCompletion 方法
-      triggerAfterCompletion(processedRequest, response, mappedHandler,
-            new NestedServletException("Handler processing failed", err));
-   }
-   finally {
-      if (asyncManager.isConcurrentHandlingStarted()) {
-         // Instead of postHandle and afterCompletion
-         if (mappedHandler != null) {
-            mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);
-         }
-      }
-      else {
-         // Clean up any resources used by a multipart request.
-         if (multipartRequestParsed) {
-            cleanupMultipart(processedRequest);
-         }
-      }
-   }
+            return count;
+        }
+    }
 }
 ```
 
-getHandler
-
-org.springframework.web.servlet.DispatcherServlet#getHandler
-
 ```java
-protected HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
-   if (this.handlerMappings != null) {
-      for (HandlerMapping hm : this.handlerMappings) {
-         if (logger.isTraceEnabled()) {
-            logger.trace(
-                  "Testing handler map [" + hm + "] in DispatcherServlet with name '" + getServletName() + "'");
-         }
-         HandlerExecutionChain handler = hm.getHandler(request);
-         if (handler != null) {
-            return handler;
-         }
-      }
-   }
-   return null;
-}
-```
+public Resource getResource(String location) {
+    Assert.notNull(location, "Location must not be null");
+    Iterator var2 = this.protocolResolvers.iterator();
 
-org.springframework.web.servlet.DispatcherServlet#getHandlerAdapter
-
-```java
-protected HandlerAdapter getHandlerAdapter(Object handler) throws ServletException {
-   if (this.handlerAdapters != null) {
-      for (HandlerAdapter ha : this.handlerAdapters) {
-         if (logger.isTraceEnabled()) {
-            logger.trace("Testing handler adapter [" + ha + "]");
-         }
-         if (ha.supports(handler)) {
-            return ha;
-         }
-      }
-   }
-   throw new ServletException("No adapter for handler [" + handler +
-         "]: The DispatcherServlet configuration needs to include a HandlerAdapter that supports this handler");
-}
-```
-
-### 前置拦截
-
-org.springframework.web.servlet.HandlerExecutionChain#applyPreHandle
-
-```java
-boolean applyPreHandle(HttpServletRequest request, HttpServletResponse response) throws Exception {
-   HandlerInterceptor[] interceptors = getInterceptors();
-   if (!ObjectUtils.isEmpty(interceptors)) {
-      for (int i = 0; i < interceptors.length; i++) {
-         HandlerInterceptor interceptor = interceptors[i];
-         if (!interceptor.preHandle(request, response, this.handler)) {
-            triggerAfterCompletion(request, response, null);
-            return false;
-         }
-         this.interceptorIndex = i;
-      }
-   }
-   return true;
-}
-```
-
-### 处理请求
-
-org.springframework.web.servlet.mvc.method.AbstractHandlerMethodAdapter#handle
-
-```java
-public final ModelAndView handle(HttpServletRequest request, HttpServletResponse response, Object handler)
-      throws Exception {
-   return handleInternal(request, response, (HandlerMethod) handler);
-}
-```
-
-org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter#handleInternal
-
-```java
-protected ModelAndView handleInternal(HttpServletRequest request,
-      HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
-
-   ModelAndView mav;
-   checkRequest(request);
-
-   // Execute invokeHandlerMethod in synchronized block if required.
-   if (this.synchronizeOnSession) {
-      HttpSession session = request.getSession(false);
-      if (session != null) {
-         Object mutex = WebUtils.getSessionMutex(session);
-         synchronized (mutex) {
-            mav = invokeHandlerMethod(request, response, handlerMethod);
-         }
-      }
-      else {
-         // No HttpSession available -> no mutex necessary
-         mav = invokeHandlerMethod(request, response, handlerMethod);
-      }
-   }
-   else {
-      // No synchronization on session demanded at all...
-      mav = invokeHandlerMethod(request, response, handlerMethod);
-   }
-
-   if (!response.containsHeader(HEADER_CACHE_CONTROL)) {
-      if (getSessionAttributesHandler(handlerMethod).hasSessionAttributes()) {
-         applyCacheSeconds(response, this.cacheSecondsForSessionAttributeHandlers);
-      }
-      else {
-         prepareResponse(response);
-      }
-   }
-
-   return mav;
-}
-```
-
-org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerAdapter#invokeHandlerMethod
-
-```java
-protected ModelAndView invokeHandlerMethod(HttpServletRequest request,
-      HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
-
-   ServletWebRequest webRequest = new ServletWebRequest(request, response);
-   try {
-      WebDataBinderFactory binderFactory = getDataBinderFactory(handlerMethod);
-      ModelFactory modelFactory = getModelFactory(handlerMethod, binderFactory);
-
-      ServletInvocableHandlerMethod invocableMethod = createInvocableHandlerMethod(handlerMethod);
-      if (this.argumentResolvers != null) {
-          //解析参数
-         invocableMethod.setHandlerMethodArgumentResolvers(this.argumentResolvers);
-      }
-      if (this.returnValueHandlers != null) {
-         //封装返回值
-         invocableMethod.setHandlerMethodReturnValueHandlers(this.returnValueHandlers);
-      }
-      invocableMethod.setDataBinderFactory(binderFactory);
-      //查找参数名称
-      invocableMethod.setParameterNameDiscoverer(this.parameterNameDiscoverer);
-
-      ModelAndViewContainer mavContainer = new ModelAndViewContainer();
-      mavContainer.addAllAttributes(RequestContextUtils.getInputFlashMap(request));
-      modelFactory.initModel(webRequest, mavContainer, invocableMethod);
-      mavContainer.setIgnoreDefaultModelOnRedirect(this.ignoreDefaultModelOnRedirect);
-
-      AsyncWebRequest asyncWebRequest = WebAsyncUtils.createAsyncWebRequest(request, response);
-      asyncWebRequest.setTimeout(this.asyncRequestTimeout);
-
-      WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
-      asyncManager.setTaskExecutor(this.taskExecutor);
-      asyncManager.setAsyncWebRequest(asyncWebRequest);
-      asyncManager.registerCallableInterceptors(this.callableInterceptors);
-      asyncManager.registerDeferredResultInterceptors(this.deferredResultInterceptors);
-
-      if (asyncManager.hasConcurrentResult()) {
-         Object result = asyncManager.getConcurrentResult();
-         mavContainer = (ModelAndViewContainer) asyncManager.getConcurrentResultContext()[0];
-         asyncManager.clearConcurrentResult();
-         if (logger.isDebugEnabled()) {
-            logger.debug("Found concurrent result value [" + result + "]");
-         }
-         invocableMethod = invocableMethod.wrapConcurrentResult(result);
-      }
-
-      invocableMethod.invokeAndHandle(webRequest, mavContainer);
-      if (asyncManager.isConcurrentHandlingStarted()) {
-         return null;
-      }
-
-      return getModelAndView(mavContainer, modelFactory, webRequest);
-   }
-   finally {
-      webRequest.requestCompleted();
-   }
-}
-```
-
-org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod#invokeAndHandle
-
-```java
-public void invokeAndHandle(ServletWebRequest webRequest, ModelAndViewContainer mavContainer,
-      Object... providedArgs) throws Exception {
-
-   Object returnValue = invokeForRequest(webRequest, mavContainer, providedArgs);//执行请求
-   setResponseStatus(webRequest);
-
-   if (returnValue == null) {
-      if (isRequestNotModified(webRequest) || getResponseStatus() != null || mavContainer.isRequestHandled()) {
-         mavContainer.setRequestHandled(true);
-         return;
-      }
-   }
-   else if (StringUtils.hasText(getResponseStatusReason())) {
-      mavContainer.setRequestHandled(true);
-      return;
-   }
-
-   mavContainer.setRequestHandled(false);
-   Assert.state(this.returnValueHandlers != null, "No return value handlers");
-   try {
-      this.returnValueHandlers.handleReturnValue(
-            returnValue, getReturnValueType(returnValue), mavContainer, webRequest);//封装响应信息
-   }
-   catch (Exception ex) {
-      if (logger.isTraceEnabled()) {
-         logger.trace(getReturnValueHandlingErrorMessage("Error handling return value", returnValue), ex);
-      }
-      throw ex;
-   }
-}
-```
-
-执行请求
-
-org.springframework.web.method.support.InvocableHandlerMethod#invokeForRequest
-
-```java
-public Object invokeForRequest(NativeWebRequest request, @Nullable ModelAndViewContainer mavContainer,
-      Object... providedArgs) throws Exception {
-
-   Object[] args = getMethodArgumentValues(request, mavContainer, providedArgs);//获取参数
-   if (logger.isTraceEnabled()) { 
-      logger.trace("Invoking '" + ClassUtils.getQualifiedMethodName(getMethod(), getBeanType()) +
-            "' with arguments " + Arrays.toString(args));
-   }
-   Object returnValue = doInvoke(args); //执行业务方法
-   if (logger.isTraceEnabled()) {
-      logger.trace("Method [" + ClassUtils.getQualifiedMethodName(getMethod(), getBeanType()) +
-            "] returned [" + returnValue + "]");
-   }
-   return returnValue;
-}
-```
-
-#### 获取方法参数
-
-org.springframework.core.DefaultParameterNameDiscoverer#DefaultParameterNameDiscoverer
-
-```java
-public DefaultParameterNameDiscoverer() { //用来获取方法参数的名称
-   if (kotlinPresent) {
-      addDiscoverer(new KotlinReflectionParameterNameDiscoverer());
-   }
-   addDiscoverer(new StandardReflectionParameterNameDiscoverer());
-   addDiscoverer(new LocalVariableTableParameterNameDiscoverer());
-}
-```
-
-org.springframework.web.method.support.InvocableHandlerMethod#getMethodArgumentValues
-
-```java
-private Object[] getMethodArgumentValues(NativeWebRequest request, @Nullable ModelAndViewContainer mavContainer, Object... providedArgs) throws Exception {//获取参数值
-   MethodParameter[] parameters = getMethodParameters();
-   Object[] args = new Object[parameters.length];
-   for (int i = 0; i < parameters.length; i++) {
-      MethodParameter parameter = parameters[i];
-      //获取参数名称
-      parameter.initParameterNameDiscovery(this.parameterNameDiscoverer);
-      args[i] = resolveProvidedArgument(parameter, providedArgs);
-      if (args[i] != null) {
-         continue;
-      }
-      if (this.argumentResolvers.supportsParameter(parameter)) {//是否支持解析此参数
-         try {
-            args[i] = this.argumentResolvers.resolveArgument(
-                  parameter, mavContainer, request, this.dataBinderFactory); //获取参数解析器，进行参数的解析
-            continue;
-         }
-         catch (Exception ex) {
-            if (logger.isDebugEnabled()) {
-               logger.debug(getArgumentResolutionErrorMessage("Failed to resolve", i), ex);
+    Resource resource;
+    do {
+        if (!var2.hasNext()) {
+            if (location.startsWith("/")) {//以/开头
+                return this.getResourceByPath(location);
             }
-            throw ex;
-         }
-      }
-      if (args[i] == null) {
-         throw new IllegalStateException("Could not resolve method parameter at index " +
-               parameter.getParameterIndex() + " in " + parameter.getExecutable().toGenericString() +
-               ": " + getArgumentResolutionErrorMessage("No suitable resolver for", i));
-      }
-   }
-   return args;
+
+            if (location.startsWith("classpath:")) {//classpath开头
+                return new ClassPathResource(location.substring("classpath:".length()), this.getClassLoader());
+            }
+
+            try {
+              //按url加载
+                URL url = new URL(location);
+                return (Resource)(ResourceUtils.isFileURL(url) ? new FileUrlResource(url) : new UrlResource(url));
+            } catch (MalformedURLException var5) {
+              //按路径加载
+                return this.getResourceByPath(location);
+            }
+        }
+
+        ProtocolResolver protocolResolver = (ProtocolResolver)var2.next();
+        resource = protocolResolver.resolve(location, this);
+    } while(resource == null);
+
+    return resource;
 }
 ```
 
-#### 执行目标方法
+spring启动时。ConfigurationClassPostProcessor会处理标记了@Configuration的类，具
+体到每个配置类的处理是通过ConfigurationClassParser来完成的
 
-org.springframework.web.method.support.InvocableHandlerMethod#doInvoke
+# redis如何自动注入？
 
 ```java
-protected Object doInvoke(Object... args) throws Exception {
-   ReflectionUtils.makeAccessible(getBridgedMethod());
-   try {
-      return getBridgedMethod().invoke(getBean(), args);
-   }
-   catch (IllegalArgumentException ex) {
-      assertTargetBean(getBridgedMethod(), getBean(), args);
-      String text = (ex.getMessage() != null ? ex.getMessage() : "Illegal argument");
-      throw new IllegalStateException(getInvocationErrorMessage(text, args), ex);
-   }
-   catch (InvocationTargetException ex) {
-      // Unwrap for HandlerExceptionResolvers ...
-      Throwable targetException = ex.getTargetException();
-      if (targetException instanceof RuntimeException) {
-         throw (RuntimeException) targetException;
-      }
-      else if (targetException instanceof Error) {
-         throw (Error) targetException;
-      }
-      else if (targetException instanceof Exception) {
-         throw (Exception) targetException;
-      }
-      else {
-         String text = getInvocationErrorMessage("Failed to invoke handler method", args);
-         throw new IllegalStateException(text, targetException);
-      }
-   }
+@Configuration
+//可以扫描到RedisOperations,引入spring-boot-starter-data-redis
+@ConditionalOnClass({RedisOperations.class})
+//注入RedisProperties（EnableConfigurationPropertie搭配ConfigurationProperties）
+@EnableConfigurationProperties({RedisProperties.class})
+//Jedis or Lettuce
+@Import({LettuceConnectionConfiguration.class, JedisConnectionConfiguration.class})
+public class RedisAutoConfiguration {
+    public RedisAutoConfiguration() {
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(
+        name = {"redisTemplate"}
+    )
+    public RedisTemplate<Object, Object> redisTemplate(RedisConnectionFactory redisConnectionFactory) throws UnknownHostException {
+        RedisTemplate<Object, Object> template = new RedisTemplate();
+        template.setConnectionFactory(redisConnectionFactory);
+        return template;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public StringRedisTemplate stringRedisTemplate(RedisConnectionFactory redisConnectionFactory) throws UnknownHostException {
+        StringRedisTemplate template = new StringRedisTemplate();
+        template.setConnectionFactory(redisConnectionFactory);
+        return template;
+    }
 }
 ```
 
-#### 处理返回结果
+如何指定序列化方式
 
-org.springframework.web.method.support.HandlerMethodReturnValueHandlerComposite#handleReturnValue
+org.springframework.data.redis.core.StringRedisTemplate#StringRedisTemplate()
 
 ```java
-public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
-      ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
-   //获取HandlerMethodReturnValueHandler
-   HandlerMethodReturnValueHandler handler = selectHandler(returnValue, returnType);
-   if (handler == null) {
-      throw new IllegalArgumentException("Unknown return value type: " + returnType.getParameterType().getName());
-   }
-    //处理返回结果
-   handler.handleReturnValue(returnValue, returnType, mavContainer, webRequest);
+public StringRedisTemplate() {
+    this.setKeySerializer(RedisSerializer.string());
+    this.setValueSerializer(RedisSerializer.string());
+    this.setHashKeySerializer(RedisSerializer.string());
+    this.setHashValueSerializer(RedisSerializer.string());
 }
 ```
 
-org.springframework.web.method.support.HandlerMethodReturnValueHandlerComposite#selectHandler
+org.springframework.data.redis.core.RedisTemplate#afterPropertiesSet
 
 ```java
-private HandlerMethodReturnValueHandler selectHandler(@Nullable Object value, MethodParameter returnType) {
-  //判断是否异步
-   boolean isAsyncValue = isAsyncReturnValue(value, returnType);
-   for (HandlerMethodReturnValueHandler handler : this.returnValueHandlers) {
-       //如果是异步但是hanler不是AsyncHandlerMethodReturnValueHandler类型，过滤
-      if (isAsyncValue && !(handler instanceof AsyncHandlerMethodReturnValueHandler)) {
-         continue;
-      }
-      //查找支持此returnType的HandlerMethodReturnValueHandler
-      if (handler.supportsReturnType(returnType)) { 
-         return handler;
-      }
-   }
-   return null;
+public void afterPropertiesSet() {
+    super.afterPropertiesSet();
+    boolean defaultUsed = false;
+    if (this.defaultSerializer == null) {
+      //默认JdkSerializationRedisSerializer
+        this.defaultSerializer = new JdkSerializationRedisSerializer(this.classLoader != null ? this.classLoader : this.getClass().getClassLoader());
+    }
+
+    if (this.enableDefaultSerializer) {
+        if (this.keySerializer == null) {
+            this.keySerializer = this.defaultSerializer;
+            defaultUsed = true;
+        }
+
+        if (this.valueSerializer == null) {
+            this.valueSerializer = this.defaultSerializer;
+            defaultUsed = true;
+        }
+
+        if (this.hashKeySerializer == null) {
+            this.hashKeySerializer = this.defaultSerializer;
+            defaultUsed = true;
+        }
+
+        if (this.hashValueSerializer == null) {
+            this.hashValueSerializer = this.defaultSerializer;
+            defaultUsed = true;
+        }
+    }
+
+    if (this.enableDefaultSerializer && defaultUsed) {
+        Assert.notNull(this.defaultSerializer, "default serializer null and not all serializers initialized");
+    }
+
+    if (this.scriptExecutor == null) {
+        this.scriptExecutor = new DefaultScriptExecutor(this);
+    }
+
+    this.initialized = true;
 }
 ```
-
-### 后置拦截
-
-org.springframework.web.servlet.HandlerExecutionChain#applyPostHandle
-
-```java
-void applyPostHandle(HttpServletRequest request, HttpServletResponse response, @Nullable ModelAndView mv)
-      throws Exception {
-
-   HandlerInterceptor[] interceptors = getInterceptors();
-   if (!ObjectUtils.isEmpty(interceptors)) {
-      for (int i = interceptors.length - 1; i >= 0; i--) {
-         HandlerInterceptor interceptor = interceptors[i];
-         interceptor.postHandle(request, response, this.handler, mv);
-      }
-   }
-}
-```
-
-org.springframework.web.servlet.DispatcherServlet#processDispatchResult
-
-```java
-private void processDispatchResult(HttpServletRequest request, HttpServletResponse response,
-      @Nullable HandlerExecutionChain mappedHandler, @Nullable ModelAndView mv,
-      @Nullable Exception exception) throws Exception {
-
-   boolean errorView = false;
-
-   if (exception != null) {
-      if (exception instanceof ModelAndViewDefiningException) {
-         logger.debug("ModelAndViewDefiningException encountered", exception);
-         mv = ((ModelAndViewDefiningException) exception).getModelAndView();
-      }
-      else {
-         Object handler = (mappedHandler != null ? mappedHandler.getHandler() : null);
-         mv = processHandlerException(request, response, handler, exception);
-         errorView = (mv != null);
-      }
-   }
-
-   // Did the handler return a view to render?
-   if (mv != null && !mv.wasCleared()) {
-      render(mv, request, response);
-      if (errorView) {
-         WebUtils.clearErrorRequestAttributes(request);
-      }
-   }
-   else {
-      if (logger.isDebugEnabled()) {
-         logger.debug("Null ModelAndView returned to DispatcherServlet with name '" + getServletName() +
-               "': assuming HandlerAdapter completed request handling");
-      }
-   }
-
-   if (WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {
-      // Concurrent handling started during a forward
-      return;
-   }
-
-   if (mappedHandler != null) {
-      mappedHandler.triggerAfterCompletion(request, response, null);
-   }
-}
-```
-
-org.springframework.web.servlet.DispatcherServlet#render
-
-```java
-protected void render(ModelAndView mv, HttpServletRequest request, HttpServletResponse response) throws Exception {
-   // Determine locale for request and apply it to the response.
-   Locale locale =
-         (this.localeResolver != null ? this.localeResolver.resolveLocale(request) : request.getLocale());
-   response.setLocale(locale);
-
-   View view;
-   String viewName = mv.getViewName();
-   if (viewName != null) {
-      // We need to resolve the view name.
-      view = resolveViewName(viewName, mv.getModelInternal(), locale, request);
-      if (view == null) {
-         throw new ServletException("Could not resolve view with name '" + mv.getViewName() +
-               "' in servlet with name '" + getServletName() + "'");
-      }
-   }
-   else {
-      // No need to lookup: the ModelAndView object contains the actual View object.
-      view = mv.getView();
-      if (view == null) {
-         throw new ServletException("ModelAndView [" + mv + "] neither contains a view name nor a " +
-               "View object in servlet with name '" + getServletName() + "'");
-      }
-   }
-
-   // Delegate to the View object for rendering.
-   if (logger.isDebugEnabled()) {
-      logger.debug("Rendering view [" + view + "] in DispatcherServlet with name '" + getServletName() + "'");
-   }
-   try {
-      if (mv.getStatus() != null) {
-         response.setStatus(mv.getStatus().value());
-      }
-      view.render(mv.getModelInternal(), request, response);
-   }
-   catch (Exception ex) {
-      if (logger.isDebugEnabled()) {
-         logger.debug("Error rendering view [" + view + "] in DispatcherServlet with name '" +
-               getServletName() + "'", ex);
-      }
-      throw ex;
-   }
-}
-```
-
-## 其他
-
-### 直接参数绑定
-
-借助ASM获取方法的参数名称
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer#getParameterNames(java.lang.reflect.Method)
-
-```java
-public String[] getParameterNames(Method method) {
-   Method originalMethod = BridgeMethodResolver.findBridgedMethod(method);
-   Class<?> declaringClass = originalMethod.getDeclaringClass();
-   Map<Member, String[]> map = this.parameterNamesCache.get(declaringClass);
-   if (map == null) {
-      map = inspectClass(declaringClass);
-      this.parameterNamesCache.put(declaringClass, map);
-   }
-   if (map != NO_DEBUG_INFO_MAP) {
-      return map.get(originalMethod);
-   }
-   return null;
-}
-```
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer#inspectClass
-
-```java
-private Map<Member, String[]> inspectClass(Class<?> clazz) {
-   InputStream is = clazz.getResourceAsStream(ClassUtils.getClassFileName(clazz));
-   if (is == null) {
-      // We couldn't load the class file, which is not fatal as it
-      // simply means this method of discovering parameter names won't work.
-      if (logger.isDebugEnabled()) {
-         logger.debug("Cannot find '.class' file for class [" + clazz +
-               "] - unable to determine constructor/method parameter names");
-      }
-      return NO_DEBUG_INFO_MAP;
-   }
-   try {
-      ClassReader classReader = new ClassReader(is);
-      Map<Member, String[]> map = new ConcurrentHashMap<Member, String[]>(32);
-      classReader.accept(new ParameterNameDiscoveringVisitor(clazz, map), 0);
-      return map;
-   }
-   catch (IOException ex) {
-      if (logger.isDebugEnabled()) {
-         logger.debug("Exception thrown while reading '.class' file for class [" + clazz +
-               "] - unable to determine constructor/method parameter names", ex);
-      }
-   }
-   catch (IllegalArgumentException ex) {
-      if (logger.isDebugEnabled()) {
-         logger.debug("ASM ClassReader failed to parse class file [" + clazz +
-               "], probably due to a new Java class file version that isn't supported yet " +
-               "- unable to determine constructor/method parameter names", ex);
-      }
-   }
-   finally {
-      try {
-         is.close();
-      }
-      catch (IOException ex) {
-         // ignore
-      }
-   }
-   return NO_DEBUG_INFO_MAP;
-}
-```
-
-LocalVariableTableParameterNameDiscoverer
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer.ParameterNameDiscoveringVisitor#visitMethod
-
-```java
-public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-   // exclude synthetic + bridged && static class initialization
-   if (!isSyntheticOrBridged(access) && !STATIC_CLASS_INIT.equals(name)) {
-      return new LocalVariableTableVisitor(clazz, memberMap, name, desc, isStatic(access));
-   }
-   return null;
-}
-```
-
-LocalVariableTableVisitor
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer.LocalVariableTableVisitor#LocalVariableTableVisitor
-
-```java
-public LocalVariableTableVisitor(Class<?> clazz, Map<Member, String[]> map, String name, String desc, boolean isStatic) {
-   super(SpringAsmInfo.ASM_VERSION);
-   this.clazz = clazz;
-   this.memberMap = map;
-   this.name = name;
-   this.args = Type.getArgumentTypes(desc);
-   this.parameterNames = new String[this.args.length];
-   this.isStatic = isStatic;
-   this.lvtSlotIndex = computeLvtSlotIndices(isStatic, this.args);
-}
-```
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer.LocalVariableTableVisitor#computeLvtSlotIndices
-
-```java
-private static int[] computeLvtSlotIndices(boolean isStatic, Type[] paramTypes) {
-   int[] lvtIndex = new int[paramTypes.length];//存放参数在本地变量表中的slot
-   int nextIndex = (isStatic ? 0 : 1); //如果是实例方法，本地变量表第一个slot存储this，之后的slot开始存方方法的参数；静态方法，从slot0开始存放参数
-   for (int i = 0; i < paramTypes.length; i++) {
-      lvtIndex[i] = nextIndex;
-      if (isWideType(paramTypes[i])) { //long或double占用两个slot
-         nextIndex += 2;
-      }
-      else {
-         nextIndex++;
-      }
-   }
-   return lvtIndex;
-}
-```
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer.LocalVariableTableVisitor#visitLocalVariable
-
-```java
-public void visitLocalVariable(String name, String description, String signature, Label start, Label end, int index) {
-   this.hasLvtInfo = true;
-   for (int i = 0; i < this.lvtSlotIndex.length; i++) {
-      if (this.lvtSlotIndex[i] == index) { //slot相同
-         this.parameterNames[i] = name; //设置参数名称
-      }
-   }
-}
-```
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer.LocalVariableTableVisitor#visitEnd
-
-```java
-public void visitEnd() {
-   if (this.hasLvtInfo || (this.isStatic && this.parameterNames.length == 0)) {
-      // visitLocalVariable will never be called for static no args methods
-      // which doesn't use any local variables.
-      // This means that hasLvtInfo could be false for that kind of methods
-      // even if the class has local variable info.
-      this.memberMap.put(resolveMember(), this.parameterNames); //method -> parameter[]
-   }
-}
-```
-
-org.springframework.core.LocalVariableTableParameterNameDiscoverer.LocalVariableTableVisitor#resolve
-
-```java
-private Member resolveMember() {
-   ClassLoader loader = this.clazz.getClassLoader();
-   Class<?>[] argTypes = new Class<?>[this.args.length];
-   for (int i = 0; i < this.args.length; i++) {
-      //根据参数的classname获取对应的Class
-      argTypes[i] = ClassUtils.resolveClassName(this.args[i].getClassName(), loader);
-   }
-   try {
-      if (CONSTRUCTOR.equals(this.name)) {
-         return this.clazz.getDeclaredConstructor(argTypes);
-      }
-      return this.clazz.getDeclaredMethod(this.name, argTypes);//根据方法名称和参数类型获取方法
-   }
-   catch (NoSuchMethodException ex) {
-      throw new IllegalStateException("Method [" + this.name +
-            "] was discovered in the .class file but cannot be resolved in the class object", ex);
-   }
-}
-```
-
-

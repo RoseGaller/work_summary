@@ -17,8 +17,14 @@
   * [异步执行，返回future，](#异步执行返回future)
 * [总结](#总结)
 
-
 # 服务端初始化
+
+```java
+private final EventLoopGroup   bossGroup     = NettyEventLoopUtil                                                                              .newEventLoopGroup(                                                                                 1,
+                                                                                    new NamedThreadFactory(
+                                                                                     "Rpc-netty-server-boss",
+                                                                                        false));
+```
 
 com.alipay.remoting.rpc.RpcServer#doInit
 
@@ -1047,11 +1053,149 @@ public void run() { //真正执行回调函数
 }
 ```
 
+空闲事件
+
+io.netty.handler.timeout.IdleStateHandler#initialize
+
+```java
+private void initialize(ChannelHandlerContext ctx) {
+    // Avoid the case where destroy() is called before scheduling timeouts.
+    // See: https://github.com/netty/netty/issues/143
+    switch (state) {
+    case 1:
+    case 2:
+        return;
+    }
+
+    state = 1;
+    initOutputChanged(ctx);
+
+    lastReadTime = lastWriteTime = ticksInNanos();
+    if (readerIdleTimeNanos > 0) {
+        readerIdleTimeout = schedule(ctx, new ReaderIdleTimeoutTask(ctx),
+                readerIdleTimeNanos, TimeUnit.NANOSECONDS);
+    }
+    if (writerIdleTimeNanos > 0) {
+        writerIdleTimeout = schedule(ctx, new WriterIdleTimeoutTask(ctx),
+                writerIdleTimeNanos, TimeUnit.NANOSECONDS);
+    }
+  //开启全空闲检测（读或者写空闲）
+    if (allIdleTimeNanos > 0) {
+        allIdleTimeout = schedule(ctx, new AllIdleTimeoutTask(ctx),
+                allIdleTimeNanos, TimeUnit.NANOSECONDS);
+    }
+}
+```
+
+io.netty.handler.timeout.IdleStateHandler.AllIdleTimeoutTask#run
+
+```java
+protected void run(ChannelHandlerContext ctx) {
+
+    long nextDelay = allIdleTimeNanos;
+    if (!reading) {
+        nextDelay -= ticksInNanos() - Math.max(lastReadTime, lastWriteTime);
+    }
+    if (nextDelay <= 0) {
+        allIdleTimeout = schedule(ctx, this, allIdleTimeNanos, TimeUnit.NANOSECONDS);
+
+        boolean first = firstAllIdleEvent;
+        firstAllIdleEvent = false;
+
+        try {
+            if (hasOutputChanged(ctx, first)) {
+                return;
+            }
+
+          //传递空闲事件
+            IdleStateEvent event = newIdleStateEvent(IdleState.ALL_IDLE, first);
+            channelIdle(ctx, event);
+        } catch (Throwable t) {
+            ctx.fireExceptionCaught(t);
+        }
+    } else {
+        // Either read or write occurred before the timeout - set a new
+        // timeout with shorter delay.
+        allIdleTimeout = schedule(ctx, this, nextDelay, TimeUnit.NANOSECONDS);
+    }
+}
+```
+
+```java
+protected void channelIdle(ChannelHandlerContext ctx, IdleStateEvent evt) throws Exception {
+    ctx.fireUserEventTriggered(evt);
+}
+```
+
+ServerIdleHandler
+
+com.alipay.remoting.ServerIdleHandler#userEventTriggered
+
+```java
+public void userEventTriggered(final ChannelHandlerContext ctx, Object evt) throws Exception {
+    //处理读写空闲事件
+    if (evt instanceof IdleStateEvent) {
+        try {
+            logger.warn("Connection idle, close it from server side: {}",
+                RemotingUtil.parseRemoteAddress(ctx.channel()));
+            ctx.close(); //关闭连接
+        } catch (Exception e) {
+            logger.warn("Exception caught when closing connection in ServerIdleHandler.", e);
+        }
+    } else {
+        super.userEventTriggered(ctx, evt);
+    }
+}
+```
+
 # 总结
+
+通信协议的设计
+
+- `ProtocolCode` ：如果一个端口，需要处理多种协议的请求，那么这个字段是必须的。因为需要根据 `ProtocolCode` 来进入不同的核心编解码器。比如在支付宝，因为曾经使用过基于mina开发的通信框架，当时设计了一版协议。因此，我们在设计新版协议时，需要预留该字段，来适配不同的协议类型。该字段可以在想换协议的时候，方便的进行更换。
+- `ProtocolVersion` ：确定了某一种通信协议后，我们还需要考虑协议的微小调整需求，因此需要增加一个 `version` 的字段，方便在协议上追加新的字段
+- `RequestType` ：请求类型， 比如`request` `response` `oneway`
+
+- `CommandCode` ：请求命令类型，比如 `request` 可以分为：负载请求，或者心跳请求。`oneway` 之所以需要单独设置，是因为在处理响应时，需要做特殊判断，来控制响应是否回传。
+- `CommandVersion` ：请求命令版本号。该字段用来区分请求命令的不同版本。如果修改 `Command` 版本，不修改协议，那么就是纯粹代码重构的需求；除此情况，`Command` 的版本升级，往往会同步做协议的升级。
+- `RequestId` ：请求 ID，该字段主要用于异步请求时，保留请求存根使用，便于响应回来时触发回调。另外，在日志打印与问题调试时，也需要该字段。
+- `Codec` ：序列化器。该字段用于保存在做业务的序列化时，使用的是哪种序列化器。通信框架不限定序列化方式，可以方便的扩展。
+- `Switch` ：协议开关，用于一些协议级别的开关控制，比如 CRC 校验，安全校验等。
+- `Timeout` ：超时字段，客户端发起请求时，所设置的超时时间。该字段非常有用，在后面会详细讲解用法。
+- `ResponseStatus` ：响应码。从字段精简的角度，我们不可能每次响应都带上完整的异常栈给客户端排查问题，因此，我们会定义一些响应码，通过编号进行网络传输，方便客户端定位问题。
+- `ClassLen` ：业务请求类名长度
+- `HeaderLen` ：业务请求头长度
+- `ContentLen` ：业务请求体长度
+- `ClassName` ：业务请求类名。需要注意类名传输的时候，务必指定字符集，不要依赖系统的默认字符集。曾经线上的机器，因为运维误操作，默认的字符集被修改，导致字符的传输出现编解码问题。而我们的通信框架指定了默认字符集，因此躲过一劫。
+- `HeaderContent` ：业务请求头
+- `BodyContent` ：业务请求体
+- `CRC32` ：CRC校验码，这也是通信场景里必不可少的一部分，，我们金融业务属性的特征，这个显得尤为重要。
+
+
+
+灵活的反序列化时机控制
+
+协议的基本字段所占用空间是比较小的，目前只有24个字节
+
+协议上的主要负载就是 `ClassName` ，`HeaderContent` ， `BodyContent` 这三部分。这三部分的序列化和反序列化是整个请求响应里最耗时的部分
+
+在请求发送阶段，在调用 Netty 的写接口之前，会在业务线程先做好序列化
+
+而在请求接收阶段，反序列化的时机就需要考虑一下了。结合上面提到的最佳实践的网络 IO 模型，请求接收阶段，我们有 IO 线程，业务线程两种线程池
+
+
+
+业务逻辑耗时时，IO线程只反序列化classname，业务线程反序列化HeaderContent和BodyContent和做业务逻辑
+
+用户希望使用多个业务线程池时使用，线程池隔离场景，IO线程反序列化className和HeaderContent，根据Header的内容选择业务线程池
+
+用户不希望切换线程，比如IO密集轻计算业务，IO线程反序列化className和HeaderContent与BodyContent和做业务处理逻辑
 
 1、借助HashedWheelTimer实现超时机制
 
 2、快速失败
+
+ 		传输协议中设有timeout这个字段，所设置的超时时间通过协议传到了 Server 端
 
 ​		服务端解码成功之后记录一个到达时间，当开始进行请求处理的时候，计算当前时间与到达时间的差值超过请求的超时时间，将此请求丢弃。
 
@@ -1063,7 +1207,18 @@ public void run() { //真正执行回调函数
 
 4、灵活配置业务请求是在IO线程中处理还是由业务线程池处理
 
-5、线程池选择器 `ExecutorSelector` ：用户可以提供多个业务线程池，使用 `ExecutorSelector` 来实现选择合适的线程池，不同的请求使用不同的线程池，对请求进行隔离
+5、线程池选择器 `ExecutorSelector` 
+
+​	用户可以提供多个业务线程池，根据ExecutorSelector` 来实现选择合适的线程池。
+
+​	不同的请求使用不同的线程池，对请求进行隔离
+
+​	ExecutorSelector和UserProcessor绑定
+
+​	UserProcessor也可以配置自用的Executor
 
 6、按需进行反序列化，降低资源消耗
 
+用户请求处理器(UserProcessor)
+
+保存业务传输对象的 `className` 与 `UserProcessor` 的对应关系

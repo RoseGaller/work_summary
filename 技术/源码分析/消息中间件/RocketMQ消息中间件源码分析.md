@@ -67,7 +67,7 @@ import org.apache.rocketmq.remoting.common.RemotingHelper;
 
 public class Producer {
     public static void main(String[] args) throws MQClientException, InterruptedException {
-
+      //producerGroup:在事务中，Broker根据producerGroup选择producer发送事务回查请求
         DefaultMQProducer producer = new DefaultMQProducer("please_rename_unique_group_name"); //设置ProducerGroupName
         producer.setNamesrvAddr("127.0.0.1:9876"); //指定nameServer地址（管理brokers）
         producer.start();	//启动producer
@@ -95,7 +95,6 @@ public class Producer {
                         countDownLatch.countDown();
                         System.out.printf("%-10d OK %s %n", index, sendResult.getMsgId());
                     }
-
                     @Override
                     public void onException(Throwable e) {
                         e.printStackTrace();
@@ -106,13 +105,58 @@ public class Producer {
                 Thread.sleep(1000);
             }
         }
-
         producer.shutdown(); //关闭producer
     }
 }
 ```
 
+主要参数
+
+```java
+private String producerGroup;
+private volatile int defaultTopicQueueNums = 4;
+private int sendMsgTimeout = 3000;
+private int compressMsgBodyOverHowmuch = 1024 * 4;
+private int retryTimesWhenSendFailed = 2;
+private int retryTimesWhenSendAsyncFailed = 2;
+private boolean retryAnotherBrokerWhenNotStoreOK = false;
+private int maxMessageSize = 1024 * 1024 * 4; // 4M
+```
+
 ## 启动生产者
+
+```java
+public DefaultMQProducer(final String namespace, final String producerGroup, RPCHook rpcHook) {
+    this.namespace = namespace;
+    this.producerGroup = producerGroup;
+    defaultMQProducerImpl = new DefaultMQProducerImpl(this, rpcHook);
+}
+```
+
+org.apache.rocketmq.client.impl.producer.DefaultMQProducerImpl#DefaultMQProducerImpl(org.apache.rocketmq.client.producer.DefaultMQProducer, org.apache.rocketmq.remoting.RPCHook)
+
+```java
+public DefaultMQProducerImpl(final DefaultMQProducer defaultMQProducer, RPCHook rpcHook) {
+    this.defaultMQProducer = defaultMQProducer;
+    this.rpcHook = rpcHook;
+
+    this.asyncSenderThreadPoolQueue = new LinkedBlockingQueue<Runnable>(50000);
+    this.defaultAsyncSenderExecutor = new ThreadPoolExecutor(
+        Runtime.getRuntime().availableProcessors(),
+        Runtime.getRuntime().availableProcessors(),
+        1000 * 60,
+        TimeUnit.MILLISECONDS,
+        this.asyncSenderThreadPoolQueue,
+        new ThreadFactory() {
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, "AsyncSenderExecutor_" + this.threadIndex.incrementAndGet());
+            }
+        });
+}
+```
 
 org.apache.rocketmq.client.producer.DefaultMQProducer#start
 
@@ -226,11 +270,11 @@ public void start() throws MQClientException {
 
 ### 同步发送
 
-SYNC：发送者向MQ执行发送消息API时，同步等待，直到消息服务器返回发送结果
+SYNC：发送者向MQ执行发送消息时，同步等待，直到消息服务器返回发送结果
 
 ### 异步发送
 
-ASYNC：发送者向MQ执行发送消息时，指定消息发送成功后的回调函数，然后调用消息发送API后，立即返回，消息发送者线程不阻塞，直到运行结束，消息发送成功或失败的回调任务在一个新的线程中执行。
+ASYNC：发送者向MQ执行发送消息时，指定消息发送成功后的回调函数，发送完消息立即返回
 
 ### 单向发送
 
@@ -244,7 +288,7 @@ ONEWAY：消息发送者向MQ执行发送消息API时，直接返回，不等待
 
 ### 全局顺序消息
 
-要保证全局顺序消息，需要先把Topic的读写队列数设置为一，然后Producer和Consumer的并发设置也要是一
+要保证全局顺序消息，需要把Topic的读写队列数设置为1，Producer和Consumer的并发设置也要是1
 
 ### 部分顺序消息
 
@@ -256,7 +300,7 @@ ONEWAY：消息发送者向MQ执行发送消息API时，直接返回，不等待
 
 设置重试次数，默认2次
 
-设置超时时间，默认3秒，
+设置超时时间，默认3秒
 
 设置发送方式SYNC、ASYNC、ONEWAY
 
@@ -750,8 +794,9 @@ public TransactionSendResult sendMessageInTransaction(final Message msg,
     }
     Validators.checkMessage(msg, this.defaultMQProducer);
     SendResult sendResult = null;
-    //设置事务类型
+    //设置事务类型Prepare
     MessageAccessor.putProperty(msg, MessageConst.PROPERTY_TRANSACTION_PREPARED, "true");
+  //生产者组名
     MessageAccessor.putProperty(msg, MessageConst.PROPERTY_PRODUCER_GROUP, this.defaultMQProducer.getProducerGroup());
     try {
         //发送消息，和普通消息发送逻辑相同
@@ -889,7 +934,7 @@ public RemotingCommand checkTransactionState(ChannelHandlerContext ctx,
                 //获取远端地址
                 final String addr = RemotingHelper.parseChannelRemoteAddr(ctx.channel());
                 //检测事务状态
-                producer.checkTransactionState(addr, messageExt, requestHeader);
+                  producer.checkTransactionState(addr, messageExt, requestHeader);
             } else {
                 log.debug("checkTransactionState, pick producer by group[{}] failed", group);
             }
@@ -997,7 +1042,7 @@ public void checkTransactionState(final String addr, final MessageExt msg,
 }
 ```
 
-## 提高发送速度
+## 如何提高发送速度？
 
 在对速度要求高，但是可靠性要求不高的场景下使用OneWay方式发送
 
@@ -1046,16 +1091,6 @@ public class Consumer {
     }
 }
 ```
-
-## 两种客户端消费类型
-
-### DefaultMQPushConsumer
-
-由系统控制读取操作，收到消息后自动调用传入的处理方法来处理
-
-### DefaultMQPullConsumer
-
-读取操作中的大部分功能由使用者自主控制。
 
 ## 两种消息模式
 
@@ -5311,6 +5346,7 @@ public boolean initialize() {
         }
     }, 5, 10, TimeUnit.SECONDS);
 
+  //输出配置信息
     this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
         @Override
         public void run() {
@@ -5368,7 +5404,9 @@ private void registerProcessor() {
     if (namesrvConfig.isClusterTest()) { //默认false
         this.remotingServer.registerDefaultProcessor(new ClusterTestRequestProcessor(this, namesrvConfig.getProductEnvName()),
             this.remotingExecutor);
-    } else { //默认请求处理器,用来处理客户端请求
+    } else { 
+      	//默认请求处理器,用来处理Client和Broker的请求
+        //并绑定线程池
         this.remotingServer.registerDefaultProcessor(new DefaultRequestProcessor(this), this.remotingExecutor);
     }
 }
@@ -5558,7 +5596,7 @@ public void start() {
 
 ```
 继承SimpleChannelInboundHandler，重写channelRead0，可实现ByteBuf自动释放，防止内存泄露
-处理客户端请求的入口类
+处理Client和Broker请求的入口类
 ```
 
 ```java
@@ -5594,6 +5632,8 @@ public void processMessageReceived(ChannelHandlerContext ctx, RemotingCommand ms
 
 ```java
 public void processRequestCommand(final ChannelHandlerContext ctx, final RemotingCommand cmd) {
+  //processorTable维护了每个equest code对应的NettyRequestProcessor和ExecutorService
+  //可以实现请求的隔离，避免互相影响
     final Pair<NettyRequestProcessor, ExecutorService> matched = this.processorTable.get(cmd.getCode());
     //默认DefaultRequestProcessor，继承AsyncNettyRequestProcessor
     final Pair<NettyRequestProcessor, ExecutorService> pair = null == matched ? this.defaultRequestProcessor : matched;
@@ -5718,7 +5758,7 @@ public void processResponseCommand(ChannelHandlerContext ctx, RemotingCommand cm
 ## DefaultRequestProcessor
 
 ```
-处理客户端和Broker的请求
+默认的请求处理器。处理Client和Broker的请求
 ```
 
 ```java
@@ -5781,6 +5821,775 @@ public RemotingCommand processRequest(ChannelHandlerContext ctx,
             break;
     }
     return null;
+}
+```
+
+
+
+# 远程通信
+
+## 顶层接口
+
+```java
+public interface RemotingService {
+    void start();
+
+    void shutdown();
+
+    void registerRPCHook(RPCHook rpcHook);
+}
+```
+
+```java
+public interface RPCHook {
+    void doBeforeRequest(final String remoteAddr, final RemotingCommand request);
+
+    void doAfterResponse(final String remoteAddr, final RemotingCommand request,
+        final RemotingCommand response);
+}
+```
+
+```java
+public interface RemotingServer extends RemotingService {
+
+    void registerProcessor(final int requestCode, final NettyRequestProcessor processor,
+        final ExecutorService executor);
+
+    void registerDefaultProcessor(final NettyRequestProcessor processor, final ExecutorService executor);
+
+    int localListenPort();
+
+    Pair<NettyRequestProcessor, ExecutorService> getProcessorPair(final int requestCode);
+
+    RemotingCommand invokeSync(final Channel channel, final RemotingCommand request,
+        final long timeoutMillis) throws InterruptedException, RemotingSendRequestException,
+        RemotingTimeoutException;
+
+    void invokeAsync(final Channel channel, final RemotingCommand request, final long timeoutMillis,
+        final InvokeCallback invokeCallback) throws InterruptedException,
+        RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException;
+
+    void invokeOneway(final Channel channel, final RemotingCommand request, final long timeoutMillis)
+        throws InterruptedException, RemotingTooMuchRequestException, RemotingTimeoutException,
+        RemotingSendRequestException;
+
+}
+```
+
+```java
+public interface RemotingClient extends RemotingService {
+
+    void updateNameServerAddressList(final List<String> addrs);
+
+    List<String> getNameServerAddressList();
+
+    RemotingCommand invokeSync(final String addr, final RemotingCommand request,
+        final long timeoutMillis) throws InterruptedException, RemotingConnectException,
+        RemotingSendRequestException, RemotingTimeoutException;
+
+    void invokeAsync(final String addr, final RemotingCommand request, final long timeoutMillis,
+        final InvokeCallback invokeCallback) throws InterruptedException, RemotingConnectException,
+        RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException;
+
+    void invokeOneway(final String addr, final RemotingCommand request, final long timeoutMillis)
+        throws InterruptedException, RemotingConnectException, RemotingTooMuchRequestException,
+        RemotingTimeoutException, RemotingSendRequestException;
+
+    void registerProcessor(final int requestCode, final NettyRequestProcessor processor,
+        final ExecutorService executor);
+
+    void setCallbackExecutor(final ExecutorService callbackExecutor);
+
+    ExecutorService getCallbackExecutor();
+
+    boolean isChannelWritable(final String addr);
+}
+```
+
+```java
+public interface ChannelEventListener {
+    void onChannelConnect(final String remoteAddr, final Channel channel);
+
+    void onChannelClose(final String remoteAddr, final Channel channel);
+
+    void onChannelException(final String remoteAddr, final Channel channel);
+
+    void onChannelIdle(final String remoteAddr, final Channel channel);
+}
+```
+
+```java
+public interface InvokeCallback {
+    void operationComplete(final ResponseFuture responseFuture);
+}
+```
+
+## 实现
+
+### 服务端
+
+```java
+public NettyRemotingServer(final NettyServerConfig nettyServerConfig,
+    final ChannelEventListener channelEventListener) {
+    super(nettyServerConfig.getServerOnewaySemaphoreValue(), nettyServerConfig.getServerAsyncSemaphoreValue());
+    this.serverBootstrap = new ServerBootstrap();
+    this.nettyServerConfig = nettyServerConfig;
+    this.channelEventListener = channelEventListener;
+
+    int publicThreadNums = nettyServerConfig.getServerCallbackExecutorThreads();
+    if (publicThreadNums <= 0) {
+        publicThreadNums = 4;
+    }
+
+    this.publicExecutor = Executors.newFixedThreadPool(publicThreadNums, new ThreadFactory() {
+        private AtomicInteger threadIndex = new AtomicInteger(0);
+
+        @Override
+        public Thread newThread(Runnable r) {
+            return new Thread(r, "NettyServerPublicExecutor_" + this.threadIndex.incrementAndGet());
+        }
+    });
+	
+  //设置Boss、worker线程池
+    if (useEpoll()) { 	//是否支持Epoll
+        this.eventLoopGroupBoss = new EpollEventLoopGroup(1, new ThreadFactory() {
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, String.format("NettyEPOLLBoss_%d", this.threadIndex.incrementAndGet()));
+            }
+        });
+
+        this.eventLoopGroupSelector = new EpollEventLoopGroup(nettyServerConfig.getServerSelectorThreads(), new ThreadFactory() {
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+            private int threadTotal = nettyServerConfig.getServerSelectorThreads();
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, String.format("NettyServerEPOLLSelector_%d_%d", threadTotal, this.threadIndex.incrementAndGet()));
+            }
+        });
+    } else {
+        this.eventLoopGroupBoss = new NioEventLoopGroup(1, new ThreadFactory() {
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, String.format("NettyNIOBoss_%d", this.threadIndex.incrementAndGet()));
+            }
+        });
+
+        this.eventLoopGroupSelector = new NioEventLoopGroup(nettyServerConfig.getServerSelectorThreads(), new ThreadFactory() {
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+            private int threadTotal = nettyServerConfig.getServerSelectorThreads();
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, String.format("NettyServerNIOSelector_%d_%d", threadTotal, this.threadIndex.incrementAndGet()));
+            }
+        });
+    }
+
+    loadSslContext();
+}
+
+public void loadSslContext() {
+    TlsMode tlsMode = TlsSystemConfig.tlsMode;
+    log.info("Server is running in TLS {} mode", tlsMode.getName());
+
+    if (tlsMode != TlsMode.DISABLED) {
+        try {
+            sslContext = TlsHelper.buildSslContext(false);
+            log.info("SSLContext created for server");
+        } catch (CertificateException e) {
+            log.error("Failed to create SSLContext for server", e);
+        } catch (IOException e) {
+            log.error("Failed to create SSLContext for server", e);
+        }
+    }
+}
+
+private boolean useEpoll() {
+    return RemotingUtil.isLinuxPlatform()
+        && nettyServerConfig.isUseEpollNativeSelector()
+        && Epoll.isAvailable();
+}
+```
+
+启动
+
+```java
+@Override
+public void start() {
+ 	 //默认线程池
+    this.defaultEventExecutorGroup = new DefaultEventExecutorGroup(
+        nettyServerConfig.getServerWorkerThreads(),
+        new ThreadFactory() {
+
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, "NettyServerCodecThread_" + this.threadIndex.incrementAndGet());
+            }
+        });
+	//共享的Handler
+    prepareSharableHandlers();
+
+    ServerBootstrap childHandler =
+        this.serverBootstrap.group(this.eventLoopGroupBoss, this.eventLoopGroupSelector)
+            .channel(useEpoll() ? EpollServerSocketChannel.class : NioServerSocketChannel.class)
+            .option(ChannelOption.SO_BACKLOG, 1024)
+            .option(ChannelOption.SO_REUSEADDR, true)
+            .option(ChannelOption.SO_KEEPALIVE, false)
+            .childOption(ChannelOption.TCP_NODELAY, true)
+            .childOption(ChannelOption.SO_SNDBUF, nettyServerConfig.getServerSocketSndBufSize())
+            .childOption(ChannelOption.SO_RCVBUF, nettyServerConfig.getServerSocketRcvBufSize())
+            .localAddress(new InetSocketAddress(this.nettyServerConfig.getListenPort()))
+            .childHandler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                public void initChannel(SocketChannel ch) throws Exception {
+                    ch.pipeline()
+                        .addLast(defaultEventExecutorGroup, HANDSHAKE_HANDLER_NAME, handshakeHandler)
+                        .addLast(defaultEventExecutorGroup,
+                            encoder,
+                            new NettyDecoder(),
+                            new IdleStateHandler(0, 0, nettyServerConfig.getServerChannelMaxIdleTimeSeconds()),
+                            connectionManageHandler,
+                            serverHandler
+                        );
+                }
+            });
+
+    if (nettyServerConfig.isServerPooledByteBufAllocatorEnable()) {// 池化内存
+        childHandler.childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT);
+    }
+
+    try {
+        ChannelFuture sync = this.serverBootstrap.bind().sync(); //绑定端口
+        InetSocketAddress addr = (InetSocketAddress) sync.channel().localAddress();
+        this.port = addr.getPort();
+    } catch (InterruptedException e1) {
+        throw new RuntimeException("this.serverBootstrap.bind().sync() InterruptedException", e1);
+    }
+
+  	//处理NettyEvent
+    if (this.channelEventListener != null) {
+        this.nettyEventExecutor.start();
+    }
+
+  	//扫描过期请求
+    this.timer.scheduleAtFixedRate(new TimerTask() {
+        @Override
+        public void run() {
+            try {
+              //发送请求时，会将请求对应的response放入responseTable
+              //请求与响应一一对应
+                NettyRemotingServer.this.scanResponseTable();
+            } catch (Throwable e) {
+                log.error("scanResponseTable exception", e);
+            }
+        }
+    }, 1000 * 3, 1000);
+}
+```
+
+```java
+@Override
+public void registerRPCHook(RPCHook rpcHook) {
+    if (rpcHook != null && !rpcHooks.contains(rpcHook)) {
+        rpcHooks.add(rpcHook);
+    }
+}
+```
+
+```java
+@Override
+public void registerProcessor(int requestCode, NettyRequestProcessor processor, ExecutorService executor) {
+    ExecutorService executorThis = executor;
+    if (null == executor) {
+        executorThis = this.publicExecutor;
+    }
+
+    Pair<NettyRequestProcessor, ExecutorService> pair = new Pair<NettyRequestProcessor, ExecutorService>(processor, executorThis);
+    this.processorTable.put(requestCode, pair);
+}
+```
+
+```java
+//注册默认的处理器
+@Override
+public void registerDefaultProcessor(NettyRequestProcessor processor, ExecutorService executor) {
+    this.defaultRequestProcessor = new Pair<NettyRequestProcessor, ExecutorService>(processor, executor);
+}
+```
+
+```java
+@Override
+public Pair<NettyRequestProcessor, ExecutorService> getProcessorPair(int requestCode) {
+    return processorTable.get(requestCode);
+}
+```
+
+org.apache.rocketmq.remoting.netty.NettyRemotingAbstract#invokeSyncImpl
+
+```java
+public RemotingCommand invokeSyncImpl(final Channel channel, final RemotingCommand request,
+    final long timeoutMillis)
+    throws InterruptedException, RemotingSendRequestException, RemotingTimeoutException {
+  	//请求的唯一标志
+    final int opaque = request.getOpaque();
+
+    try {
+        //创建请求的ResponseFuture
+        final ResponseFuture responseFuture = new ResponseFuture(channel, opaque, timeoutMillis, null, null);
+        this.responseTable.put(opaque, responseFuture);
+      
+        final SocketAddress addr = channel.remoteAddress();
+      		//立即发送请求
+        channel.writeAndFlush(request).addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture f) throws Exception {
+                if (f.isSuccess()) {//发送成功
+                    responseFuture.setSendRequestOK(true);
+                    return;
+                } else {
+                    responseFuture.setSendRequestOK(false);
+                }
+								//发送失败
+                responseTable.remove(opaque);
+                responseFuture.setCause(f.cause());
+                responseFuture.putResponse(null);
+                log.warn("send a request command to channel <" + addr + "> failed.");
+            }
+        });
+       //阻塞等待响应
+        RemotingCommand responseCommand = responseFuture.waitResponse(timeoutMillis);
+        if (null == responseCommand) { //超时
+            if (responseFuture.isSendRequestOK()) {
+                throw new RemotingTimeoutException(RemotingHelper.parseSocketAddressAddr(addr), timeoutMillis,
+                    responseFuture.getCause());
+            } else {
+                throw new RemotingSendRequestException(RemotingHelper.parseSocketAddressAddr(addr), responseFuture.getCause());
+            }
+        }
+
+        return responseCommand;
+    } finally {
+        this.responseTable.remove(opaque);
+    }
+}
+```
+
+```java
+@Override
+public void invokeAsync(Channel channel, RemotingCommand request, long timeoutMillis, InvokeCallback invokeCallback)
+    throws InterruptedException, RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+    this.invokeAsyncImpl(channel, request, timeoutMillis, invokeCallback);
+}
+```
+
+```java
+public void invokeAsyncImpl(final Channel channel, final RemotingCommand request, final long timeoutMillis,
+    final InvokeCallback invokeCallback)
+    throws InterruptedException, RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+    long beginStartTime = System.currentTimeMillis();
+    final int opaque = request.getOpaque();
+  	//信号量用于限制正在进行的异步请求的最大数量，从而保护系统内存占用
+    boolean acquired = this.semaphoreAsync.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+    if (acquired) {
+      //对Semaphore进行封装，防止多次释放
+      //当接收到响应信息时，才会释放
+        final SemaphoreReleaseOnlyOnce once = new SemaphoreReleaseOnlyOnce(this.semaphoreAsync);
+        long costTime = System.currentTimeMillis() - beginStartTime;
+        if (timeoutMillis < costTime) { //已经超时
+            once.release();
+            throw new RemotingTimeoutException("invokeAsyncImpl call timeout");
+        }
+
+        final ResponseFuture responseFuture = new ResponseFuture(channel, opaque, timeoutMillis - costTime, invokeCallback, once);
+        this.responseTable.put(opaque, responseFuture);
+        try {
+            channel.writeAndFlush(request).addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture f) throws Exception {
+                    if (f.isSuccess()) {
+                        responseFuture.setSendRequestOK(true);
+                        return;
+                    }
+                    requestFail(opaque);
+                    log.warn("send a request command to channel <{}> failed.", RemotingHelper.parseChannelRemoteAddr(channel));
+                }
+            });
+        } catch (Exception e) {
+            responseFuture.release();
+            log.warn("send a request command to channel <" + RemotingHelper.parseChannelRemoteAddr(channel) + "> Exception", e);
+            throw new RemotingSendRequestException(RemotingHelper.parseChannelRemoteAddr(channel), e);
+        }
+    } else {
+        if (timeoutMillis <= 0) {
+            throw new RemotingTooMuchRequestException("invokeAsyncImpl invoke too fast");
+        } else {
+            String info =
+                String.format("invokeAsyncImpl tryAcquire semaphore timeout, %dms, waiting thread nums: %d semaphoreAsyncValue: %d",
+                    timeoutMillis,
+                    this.semaphoreAsync.getQueueLength(),
+                    this.semaphoreAsync.availablePermits()
+                );
+            log.warn(info);
+            throw new RemotingTimeoutException(info);
+        }
+    }
+}
+```
+
+```java
+@Override
+public void invokeOneway(Channel channel, RemotingCommand request, long timeoutMillis) throws InterruptedException,
+    RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+    this.invokeOnewayImpl(channel, request, timeoutMillis);
+}
+```
+
+
+
+```java
+public void invokeOnewayImpl(final Channel channel, final RemotingCommand request, final long timeoutMillis)
+    throws InterruptedException, RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+    request.markOnewayRPC();
+  //限流
+    boolean acquired = this.semaphoreOneway.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+    if (acquired) {
+        final SemaphoreReleaseOnlyOnce once = new SemaphoreReleaseOnlyOnce(this.semaphoreOneway);
+        try {
+            channel.writeAndFlush(request).addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture f) throws Exception {
+                    once.release(); //释放
+                    if (!f.isSuccess()) {
+                        log.warn("send a request command to channel <" + channel.remoteAddress() + "> failed.");
+                    }
+                }
+            });
+        } catch (Exception e) {
+            once.release();
+            log.warn("write send a request command to channel <" + channel.remoteAddress() + "> failed.");
+            throw new RemotingSendRequestException(RemotingHelper.parseChannelRemoteAddr(channel), e);
+        }
+    } else {
+        if (timeoutMillis <= 0) {
+            throw new RemotingTooMuchRequestException("invokeOnewayImpl invoke too fast");
+        } else {
+            String info = String.format(
+                "invokeOnewayImpl tryAcquire semaphore timeout, %dms, waiting thread nums: %d semaphoreAsyncValue: %d",
+                timeoutMillis,
+                this.semaphoreOneway.getQueueLength(),
+                this.semaphoreOneway.availablePermits()
+            );
+            log.warn(info);
+            throw new RemotingTimeoutException(info);
+        }
+    }
+```
+
+### 客户端
+
+org.apache.rocketmq.remoting.netty.NettyRemotingClient#NettyRemotingClient(org.apache.rocketmq.remoting.netty.NettyClientConfig, org.apache.rocketmq.remoting.ChannelEventListener)
+
+```java
+public NettyRemotingClient(final NettyClientConfig nettyClientConfig,
+    final ChannelEventListener channelEventListener) {
+    super(nettyClientConfig.getClientOnewaySemaphoreValue(), nettyClientConfig.getClientAsyncSemaphoreValue());
+    this.nettyClientConfig = nettyClientConfig;
+    this.channelEventListener = channelEventListener;
+
+  	//公共线程池
+    int publicThreadNums = nettyClientConfig.getClientCallbackExecutorThreads();
+    if (publicThreadNums <= 0) {
+        publicThreadNums = 4;
+    }
+    this.publicExecutor = Executors.newFixedThreadPool(publicThreadNums, new ThreadFactory() {
+        private AtomicInteger threadIndex = new AtomicInteger(0);
+        @Override
+        public Thread newThread(Runnable r) {
+            return new Thread(r, "NettyClientPublicExecutor_" + this.threadIndex.incrementAndGet());
+        }
+    });
+
+  //worker线程池
+    this.eventLoopGroupWorker = new NioEventLoopGroup(1, new ThreadFactory() {
+        private AtomicInteger threadIndex = new AtomicInteger(0);
+
+        @Override
+        public Thread newThread(Runnable r) {
+            return new Thread(r, String.format("NettyClientSelector_%d", this.threadIndex.incrementAndGet()));
+        }
+    });
+
+    if (nettyClientConfig.isUseTLS()) {
+        try {
+            sslContext = TlsHelper.buildSslContext(true);
+            log.info("SSL enabled for client");
+        } catch (IOException e) {
+            log.error("Failed to create SSLContext", e);
+        } catch (CertificateException e) {
+            log.error("Failed to create SSLContext", e);
+            throw new RuntimeException("Failed to create SSLContext", e);
+        }
+    }
+}
+```
+
+```java
+@Override
+public void start() {
+  	//默认线程池
+    this.defaultEventExecutorGroup = new DefaultEventExecutorGroup(
+        nettyClientConfig.getClientWorkerThreads(),
+        new ThreadFactory() {
+
+            private AtomicInteger threadIndex = new AtomicInteger(0);
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, "NettyClientWorkerThread_" + this.threadIndex.incrementAndGet());
+            }
+        });
+
+  	//创建Bootstrap
+    Bootstrap handler = this.bootstrap.group(this.eventLoopGroupWorker).channel(NioSocketChannel.class)
+        .option(ChannelOption.TCP_NODELAY, true) //立即发送
+        .option(ChannelOption.SO_KEEPALIVE, false) //关闭keepalive
+        .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, nettyClientConfig.getConnectTimeoutMillis()) //连接超时
+        .option(ChannelOption.SO_SNDBUF, nettyClientConfig.getClientSocketSndBufSize()) //发生缓冲区
+        .option(ChannelOption.SO_RCVBUF, nettyClientConfig.getClientSocketRcvBufSize()) //接收缓冲区
+        .handler(new ChannelInitializer<SocketChannel>() {
+            @Override
+            public void initChannel(SocketChannel ch) throws Exception {
+                ChannelPipeline pipeline = ch.pipeline();
+                if (nettyClientConfig.isUseTLS()) {
+                    if (null != sslContext) {
+                        pipeline.addFirst(defaultEventExecutorGroup, "sslHandler", sslContext.newHandler(ch.alloc()));
+                        log.info("Prepend SSL handler");
+                    } else {
+                        log.warn("Connections are insecure as SSLContext is null!");
+                    }
+                }
+                pipeline.addLast(
+                    defaultEventExecutorGroup,
+                    new NettyEncoder(), //编码 
+                    new NettyDecoder(), //解码
+                    new IdleStateHandler(0, 0, nettyClientConfig.getClientChannelMaxIdleTimeSeconds()), //空闲时间
+                    new NettyConnectManageHandler(), //连接管理
+                    new NettyClientHandler()); //请求响应处理
+            }
+        });
+
+    //扫描过期的请求
+    this.timer.scheduleAtFixedRate(new TimerTask() {
+        @Override
+        public void run() {
+            try {
+                NettyRemotingClient.this.scanResponseTable();
+            } catch (Throwable e) {
+                log.error("scanResponseTable exception", e);
+            }
+        }
+    }, 1000 * 3, 1000);
+
+  //内部有数据结构存放各种事件（连接、关闭、异常、空闲），异步处理
+    if (this.channelEventListener != null) {
+        this.nettyEventExecutor.start();
+    }
+}
+```
+
+org.apache.rocketmq.remoting.netty.NettyRemotingClient#createChannel
+
+```java
+private Channel createChannel(final String addr) throws InterruptedException {
+    ChannelWrapper cw = this.channelTables.get(addr);
+    if (cw != null && cw.isOK()) {
+        return cw.getChannel();
+    }
+
+    if (this.lockChannelTables.tryLock(LOCK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+        try {
+            boolean createNewConnection;
+            cw = this.channelTables.get(addr);
+            if (cw != null) {
+
+                if (cw.isOK()) {
+                    return cw.getChannel();
+                } else if (!cw.getChannelFuture().isDone()) {
+                    createNewConnection = false;
+                } else {
+                    this.channelTables.remove(addr);
+                    createNewConnection = true;
+                }
+            } else {
+                createNewConnection = true;
+            }
+
+            if (createNewConnection) {
+                ChannelFuture channelFuture = this.bootstrap.connect(RemotingHelper.string2SocketAddress(addr));
+                log.info("createChannel: begin to connect remote host[{}] asynchronously", addr);
+                cw = new ChannelWrapper(channelFuture);
+                this.channelTables.put(addr, cw);
+            }
+        } catch (Exception e) {
+            log.error("createChannel: create channel exception", e);
+        } finally {
+            this.lockChannelTables.unlock();
+        }
+    } else {
+        log.warn("createChannel: try to lock channel table, but timeout, {}ms", LOCK_TIMEOUT_MILLIS);
+    }
+
+    if (cw != null) {
+        ChannelFuture channelFuture = cw.getChannelFuture();
+        if (channelFuture.awaitUninterruptibly(this.nettyClientConfig.getConnectTimeoutMillis())) {
+            if (cw.isOK()) {
+                log.info("createChannel: connect remote host[{}] success, {}", addr, channelFuture.toString());
+                return cw.getChannel();
+            } else {
+                log.warn("createChannel: connect remote host[" + addr + "] failed, " + channelFuture.toString(), channelFuture.cause());
+            }
+        } else {
+            log.warn("createChannel: connect remote host[{}] timeout {}ms, {}", addr, this.nettyClientConfig.getConnectTimeoutMillis(),
+                channelFuture.toString());
+        }
+    }
+
+    return null;
+}
+```
+
+
+
+```java
+@Override
+public RemotingCommand invokeSync(String addr, final RemotingCommand request, long timeoutMillis)
+    throws InterruptedException, RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException {
+    long beginStartTime = System.currentTimeMillis();
+    final Channel channel = this.getAndCreateChannel(addr);
+    if (channel != null && channel.isActive()) {
+        try {
+            doBeforeRpcHooks(addr, request);
+            long costTime = System.currentTimeMillis() - beginStartTime;
+            if (timeoutMillis < costTime) {
+                throw new RemotingTimeoutException("invokeSync call timeout");
+            }
+            RemotingCommand response = this.invokeSyncImpl(channel, request, timeoutMillis - costTime);
+            doAfterRpcHooks(RemotingHelper.parseChannelRemoteAddr(channel), request, response);
+            return response;
+        } catch (RemotingSendRequestException e) {
+            log.warn("invokeSync: send request exception, so close the channel[{}]", addr);
+            this.closeChannel(addr, channel);
+            throw e;
+        } catch (RemotingTimeoutException e) {
+            if (nettyClientConfig.isClientCloseSocketIfTimeout()) {
+                this.closeChannel(addr, channel);
+                log.warn("invokeSync: close socket because of timeout, {}ms, {}", timeoutMillis, addr);
+            }
+            log.warn("invokeSync: wait response timeout exception, the channel[{}]", addr);
+            throw e;
+        }
+    } else {
+        this.closeChannel(addr, channel);
+        throw new RemotingConnectException(addr);
+    }
+}
+```
+
+```java
+public RemotingCommand invokeSyncImpl(final Channel channel, final RemotingCommand request,
+    final long timeoutMillis)
+    throws InterruptedException, RemotingSendRequestException, RemotingTimeoutException {
+    final int opaque = request.getOpaque();
+
+    try {
+        final ResponseFuture responseFuture = new ResponseFuture(channel, opaque, timeoutMillis, null, null);
+        this.responseTable.put(opaque, responseFuture);
+        final SocketAddress addr = channel.remoteAddress();
+        channel.writeAndFlush(request).addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture f) throws Exception {
+                if (f.isSuccess()) {
+                    responseFuture.setSendRequestOK(true);
+                    return;
+                } else {
+                    responseFuture.setSendRequestOK(false);
+                }
+
+                responseTable.remove(opaque);
+                responseFuture.setCause(f.cause());
+                responseFuture.putResponse(null);
+                log.warn("send a request command to channel <" + addr + "> failed.");
+            }
+        });
+
+        RemotingCommand responseCommand = responseFuture.waitResponse(timeoutMillis);
+        if (null == responseCommand) {
+            if (responseFuture.isSendRequestOK()) {
+                throw new RemotingTimeoutException(RemotingHelper.parseSocketAddressAddr(addr), timeoutMillis,
+                    responseFuture.getCause());
+            } else {
+                throw new RemotingSendRequestException(RemotingHelper.parseSocketAddressAddr(addr), responseFuture.getCause());
+            }
+        }
+
+        return responseCommand;
+    } finally {
+        this.responseTable.remove(opaque);
+    }
+}
+```
+
+```java
+public void invokeAsync(String addr, RemotingCommand request, long timeoutMillis, InvokeCallback invokeCallback)
+    throws InterruptedException, RemotingConnectException, RemotingTooMuchRequestException, RemotingTimeoutException,
+    RemotingSendRequestException {
+    long beginStartTime = System.currentTimeMillis();
+    final Channel channel = this.getAndCreateChannel(addr);
+    if (channel != null && channel.isActive()) {
+        try {
+            doBeforeRpcHooks(addr, request);
+            long costTime = System.currentTimeMillis() - beginStartTime;
+            if (timeoutMillis < costTime) {
+                throw new RemotingTooMuchRequestException("invokeAsync call timeout");
+            }
+            this.invokeAsyncImpl(channel, request, timeoutMillis - costTime, invokeCallback);
+        } catch (RemotingSendRequestException e) {
+            log.warn("invokeAsync: send request exception, so close the channel[{}]", addr);
+            this.closeChannel(addr, channel);
+            throw e;
+        }
+    } else {
+        this.closeChannel(addr, channel);
+        throw new RemotingConnectException(addr);
+    }
+}
+```
+
+```java
+public void invokeOneway(String addr, RemotingCommand request, long timeoutMillis) throws InterruptedException,
+    RemotingConnectException, RemotingTooMuchRequestException, RemotingTimeoutException, RemotingSendRequestException {
+    final Channel channel = this.getAndCreateChannel(addr);
+    if (channel != null && channel.isActive()) {
+        try {
+            doBeforeRpcHooks(addr, request);
+            this.invokeOnewayImpl(channel, request, timeoutMillis);
+        } catch (RemotingSendRequestException e) {
+            log.warn("invokeOneway: send request exception, so close the channel[{}]", addr);
+            this.closeChannel(addr, channel);
+            throw e;
+        }
+    } else {
+        this.closeChannel(addr, channel);
+        throw new RemotingConnectException(addr);
+    }
 }
 ```
 

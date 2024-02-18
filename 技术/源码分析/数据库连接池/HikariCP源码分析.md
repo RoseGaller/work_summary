@@ -8,7 +8,7 @@
 public T borrow(long timeout, final TimeUnit timeUnit) throws InterruptedException
 {
    // Try the thread-local list first
-   // 首先查看threadLocal是否有空闲连接
+   // 1、首先查看threadLocal是否有空闲连接
    final List<Object> list = threadList.get();
    for (int i = list.size() - 1; i >= 0; i--) {
       final Object entry = list.remove(i);
@@ -19,7 +19,8 @@ public T borrow(long timeout, final TimeUnit timeUnit) throws InterruptedExcepti
          return bagEntry;
       }
    }
-   //从共享队列获取空闲连接
+   //2、从共享队列获取空闲连接（初始化时，创建的连接放在共享队列中）
+  //private final CopyOnWriteArrayList<T> sharedList; 写时复制，写时加锁
    // Otherwise, scan the shared list ... then poll the  queue
    final int waiting = waiters.incrementAndGet();
    try {
@@ -83,7 +84,9 @@ public void   requite(final T bagEntry)
 
 ### FastList
 
-#### 获取数据com.zaxxer.hikari.util.FastList
+#### 获取数据
+
+#### com.zaxxer.hikari.util.FastList
 
 ```java
 public T get(int index) 
@@ -93,7 +96,9 @@ public T get(int index)
 }
 ```
 
-#### 移除数据com.zaxxer.hikari.util.FastList#remove(java.lang.Object)
+#### 移除数据
+
+#### com.zaxxer.hikari.util.FastList#remove(java.lang.Object)
 
 ```java
 public boolean remove(Object element)
@@ -113,4 +118,3 @@ public boolean remove(Object element)
 }
 ```
 
-## 

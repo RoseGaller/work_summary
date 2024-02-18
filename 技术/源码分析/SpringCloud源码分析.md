@@ -30,43 +30,57 @@
     * [FeignClientFactoryBean](#feignclientfactorybean)
   * [获取代理对象](#获取代理对象)
 
-
 # EurekaServer
+
+1、打开开发工具，创建一个 Spring Cloud 的项目，然后在 pom 中增加 spring-cloud-starter-netflix-eureka-server 的依赖
+
+2、创建一个 EurekaServerApplication 的启动类，启动类上使用@EnableEurekaServer 开启 EurekaServer 的自动装配功能
+
+3、 需要配置 Eureka Server 需要的信息，端口配置成 8761，
+
+添加一个 eureka.client.register-with-eureka=false 的配置，本身是 Eureka Server 节点，不需要将自己进行注册。
+
+再添加一个 eureka.client.fetch-registry=false 的配置，这里也设置成 false，因为不需要消费其他服务信息，所以也不需要拉取注册表信息
+
+4、启动项目，然后访问 8761 端口，可以看到 Eureka 的管理页面，表示 Eureka 启动成功了
 
 springboot应用启动时会从spring.factories文件中加载EurekaServerAutoConfiguration自动配置类
 
-```java
-@Configuration
-@Import({EurekaServerInitializerConfiguration.class})
-@ConditionalOnBean({Marker.class})
-@EnableConfigurationProperties({EurekaDashboardProperties.class, InstanceRegistryProperties.class})
-@PropertySource({"classpath:/eureka/server.properties"})
-public class EurekaServerAutoConfiguration extends WebMvcConfigurerAdapter {
-```
-
 需要有一个marker bean，才能装配Eureka Server，marker bean 其实是由@EnableEurekaServer注解决定的
 
-## EnableEurekaServer注解
+```properties
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+  org.springframework.cloud.netflix.eureka.server.EurekaServerAutoConfiguratio
+```
 
-org.springframework.cloud.netflix.eureka.server.EnableEurekaServer
+在启动上标注@EnableEurekaServer注解,
 
 ```java
-@Target({ElementType.TYPE})
+@Target(ElementType.TYPE)
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
-@Import({EurekaServerMarkerConfiguration.class})
+@Import(EurekaServerMarkerConfiguration.class)
 public @interface EnableEurekaServer {
+
 }
 ```
-
-org.springframework.cloud.netflix.eureka.server.EurekaServerMarkerConfiguration
 
 ```java
-@Bean
-public EurekaServerMarkerConfiguration.Marker eurekaServerMarkerBean() {
-    return new EurekaServerMarkerConfiguration.Marker();
+@Configuration
+public class EurekaServerMarkerConfiguration {
+
+  //注入Marker，表明EurekaServer
+   @Bean
+   public Marker eurekaServerMarkerBean() {
+      return new Marker();
+   }
+
+   class Marker {
+   }
 }
 ```
+
+
 
 org.springframework.cloud.netflix.eureka.server.EurekaServerAutoConfiguration#eurekaController
 
@@ -92,9 +106,10 @@ public void register(InstanceInfo info, boolean isReplication) {
     if (info.getLeaseInfo() != null && info.getLeaseInfo().getDurationInSecs() > 0) {
         leaseDuration = info.getLeaseInfo().getDurationInSecs();
     }
-	
-    super.register(info, leaseDuration, isReplication); //注册实例
-    this.replicateToPeers(PeerAwareInstanceRegistryImpl.Action.Register, info.getAppName(), info.getId(), info, (InstanceStatus)null, isReplication);//复制实例到其他节点
+		//注册实例
+    super.register(info, leaseDuration, isReplication); 
+  	//复制实例到其他节点
+    this.replicateToPeers(PeerAwareInstanceRegistryImpl.Action.Register, info.getAppName(), info.getId(), info, (InstanceStatus)null, isReplication);
 }
 ```
 
@@ -236,8 +251,6 @@ private void replicateInstanceActionsToPeers(PeerAwareInstanceRegistryImpl.Actio
 }
 ```
 
-获取服务
-
 com.netflix.eureka.registry.AbstractInstanceRegistry#getApplication(java.lang.String)
 
 ```java
@@ -278,12 +291,42 @@ public Application getApplication(String appName, boolean includeRemoteRegion) {
 
 ## 服务续约
 
+com.netflix.eureka.resources.InstanceResource#renewLease
+
+```java
+@PUT
+public Response renewLease(@HeaderParam("x-netflix-discovery-replication") String isReplication, @QueryParam("overriddenstatus") String overriddenStatus, @QueryParam("status") String status, @QueryParam("lastDirtyTimestamp") String lastDirtyTimestamp) {
+    boolean isFromReplicaNode = "true".equals(isReplication);
+		//续约
+    boolean isSuccess = this.registry.renew(this.app.getName(), this.id, isFromReplicaNode);
+    if (!isSuccess) {
+        logger.warn("Not Found (Renew): {} - {}", this.app.getName(), this.id);
+        return Response.status(Status.NOT_FOUND).build();
+    } else {
+        Response response = null;
+        if (lastDirtyTimestamp != null && this.serverConfig.shouldSyncWhenTimestampDiffers()) {
+            response = this.validateDirtyTimestamp(Long.valueOf(lastDirtyTimestamp), isFromReplicaNode);
+            if (response.getStatus() == Status.NOT_FOUND.getStatusCode() && overriddenStatus != null && !InstanceStatus.UNKNOWN.name().equals(overriddenStatus) && isFromReplicaNode) {
+                this.registry.storeOverriddenStatusIfRequired(this.app.getAppName(), this.id, InstanceStatus.valueOf(overriddenStatus));
+            }
+        } else {
+            response = Response.ok().build();
+        }
+
+        logger.debug("Found (Renew): {} - {}; reply status={}" + this.app.getName(), this.id, response.getStatus());
+        return response;
+    }
+}
+```
+
 com.netflix.eureka.registry.PeerAwareInstanceRegistryImpl#renew
 
 ```java
 public boolean renew(String appName, String id, boolean isReplication) {
-    if (super.renew(appName, id, isReplication)) { //本机续约
-        this.replicateToPeers(PeerAwareInstanceRegistryImpl.Action.Heartbeat, appName, id, (InstanceInfo)null, (InstanceStatus)null, isReplication); //集群其他节点续约
+  		 //本机续约
+    if (super.renew(appName, id, isReplication)) {
+       //集群其他节点续约
+        this.replicateToPeers(PeerAwareInstanceRegistryImpl.Action.Heartbeat, appName, id, (InstanceInfo)null, (InstanceStatus)null, isReplication);
         return true;
     } else {
         return false;
@@ -332,6 +375,8 @@ public boolean renew(String appName, String id, boolean isReplication) {
 }
 ```
 
+
+
 # EurekaClient
 
 EurekaClientAutoConfiguration
@@ -367,7 +412,7 @@ public EurekaClientConfigBean eurekaClientConfigBean(ConfigurableEnvironment env
 }
 ```
 
-```
+```java
 @Bean
 @ConditionalOnMissingBean(
     value = {EurekaInstanceConfig.class},
@@ -448,6 +493,78 @@ public ApplicationInfoManager eurekaApplicationInfoManager(EurekaInstanceConfig 
 ```
 
 ## 实例化EurekaClient
+
+```java
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+@Inherited
+@Import(EnableDiscoveryClientImportSelector.class)
+public @interface EnableDiscoveryClient {
+
+   /**
+    * If true, the ServiceRegistry will automatically register the local server.
+    */
+   boolean autoRegister() default true;
+}
+```
+
+org.springframework.cloud.client.discovery.EnableDiscoveryClientImportSelector#selectImports
+
+```java
+public String[] selectImports(AnnotationMetadata metadata) {
+   String[] imports = super.selectImports(metadata);
+
+   AnnotationAttributes attributes = AnnotationAttributes.fromMap(
+         metadata.getAnnotationAttributes(getAnnotationClass().getName(), true));
+
+   boolean autoRegister = attributes.getBoolean("autoRegister");
+
+  //自动注册
+   if (autoRegister) {
+      List<String> importsList = new ArrayList<>(Arrays.asList(imports));
+      importsList.add("org.springframework.cloud.client.serviceregistry.AutoServiceRegistrationConfiguration");
+      imports = importsList.toArray(new String[0]);
+   } else {
+      Environment env = getEnvironment();
+      if(ConfigurableEnvironment.class.isInstance(env)) {
+         ConfigurableEnvironment configEnv = (ConfigurableEnvironment)env;
+         LinkedHashMap<String, Object> map = new LinkedHashMap<>();
+         map.put("spring.cloud.service-registry.auto-registration.enabled", false);
+         MapPropertySource propertySource = new MapPropertySource(
+               "springCloudDiscoveryClient", map);
+         configEnv.getPropertySources().addLast(propertySource);
+      }
+
+   }
+
+   return imports;
+}
+```
+
+org.springframework.cloud.client.serviceregistry.AutoServiceRegistrationAutoConfiguration
+
+```java
+@Configuration
+@Import(AutoServiceRegistrationConfiguration.class)
+@ConditionalOnProperty(value = "spring.cloud.service-registry.auto-registration.enabled", matchIfMissing = true)
+public class AutoServiceRegistrationAutoConfiguration {
+
+   @Autowired(required = false)
+   private AutoServiceRegistration autoServiceRegistration;
+
+   @Autowired
+   private AutoServiceRegistrationProperties properties;
+
+   @PostConstruct
+   protected void init() {
+     //自动服务注册不能为空
+      if (autoServiceRegistration == null && this.properties.isFailFast()) {
+         throw new IllegalStateException("Auto Service Registration has been requested, but there is no AutoServiceRegistration bean");
+      }
+   }
+}
+```
 
 ```java
 @Bean(
@@ -670,765 +787,418 @@ void unregister() {
 }
 ```
 
-# Ribbon
-
-## 组件
-
-### LoadBalanced
-
-表明启用负载均衡功能
+org.springframework.boot.SpringApplication#run(java.lang.String...)
 
 ```java
-/**
- * Annotation to mark a RestTemplate bean to be configured to use a LoadBalancerClient
- * @author Spencer Gibb
- */
-@Target({ ElementType.FIELD, ElementType.PARAMETER, ElementType.METHOD })
-@Retention(RetentionPolicy.RUNTIME)
-@Documented
-@Inherited
-@Qualifier
-public @interface LoadBalanced {
+public ConfigurableApplicationContext run(String... args) {
+  //...
+ SpringApplicationRunListeners listeners = this.getRunListeners(args);
+  //...
+  listeners.starting();
+   try {
+            listeners.running(context);
+            return context;
+        } catch (Throwable var9) {
+            this.handleRunFailure(context, var9, exceptionReporters, (SpringApplicationRunListeners)null);
+            throw new IllegalStateException(var9);
+        }
+}
+```
+
+org.springframework.boot.SpringApplicationRunListeners#running
+
+```java
+public void running(ConfigurableApplicationContext context) {
+    Iterator var2 = this.listeners.iterator();
+
+    while(var2.hasNext()) {
+        SpringApplicationRunListener listener = (SpringApplicationRunListener)var2.next();
+        listener.running(context);
+    }
+
 }
 ```
 
 ```java
-public interface LoadBalancerClient extends ServiceInstanceChooser {
-
-   <T> T execute(String serviceId, LoadBalancerRequest<T> request) throws IOException;
-
-   <T> T execute(String serviceId, ServiceInstance serviceInstance, LoadBalancerRequest<T> request) throws IOException;
-
-   URI reconstructURI(ServiceInstance instance, URI original);
+public void running(ConfigurableApplicationContext context) {
+  //发布ApplicationReadyEvent
+    context.publishEvent(new     public void running(ConfigurableApplicationContext context) {
+        context.publishEvent(new ApplicationReadyEvent(this.application, this.args, context));
+    }(this.application, this.args, context));
 }
 ```
 
-### LoadBalancerAutoConfiguration
+控制器
+
+```java
+@Bean
+public ZuulController zuulControlleco) {
+    return new ZuulController(); //控制器 
+}
+
+@Bean
+public ZuulHandlerMapping zuulHandlerMapping(RouteLocator routes) { //handlermapping
+    ZuulHandlerMapping mapping = new ZuulHandlerMapping(routes, this.zuulController());
+    mapping.setErrorController(this.errorController);
+    return mapping;
+}
+```
+
+```java
+public ZuulController() {
+    this.setServletClass(ZuulServlet.class);
+    this.setServletName("zuul");
+    this.setSupportedMethods((String[])null);
+}
+```
+
+org.springframework.web.servlet.mvc.ServletWrappingController#afterPropertiesSet
+
+```java
+public void afterPropertiesSet() throws Exception {
+    if (this.servletClass == null) {
+        throw new IllegalArgumentException("'servletClass' is required");
+    } else {
+        if (this.servletName == null) {
+            this.servletName = this.beanName;
+        }
+				//实例化ZuulServlet
+        this.servletInstance = (Servlet)this.servletClass.newInstance();
+        this.servletInstance.init(new ServletWrappingController.DelegatingServletConfig());
+    }
+}
+```
+
+过滤器
+
+```java
+@Bean
+public ServletDetectionFilter servletDetectionFilter() {
+    return new ServletDetectionFilter();
+}
+
+@Bean
+public FormBodyWrapperFilter formBodyWrapperFilter() {
+    return new FormBodyWrapperFilter();
+}
+
+@Bean
+public DebugFilter debugFilter() {
+    return new DebugFilter();
+}
+
+@Bean
+public Servlet30WrapperFilter servlet30WrapperFilter() {
+    return new Servlet30WrapperFilter();
+}
+
+@Bean
+public SendResponseFilter sendResponseFilter() {
+    return new SendResponseFilter();
+}
+
+@Bean
+public SendErrorFilter sendErrorFilter() {
+    return new SendErrorFilter();
+}
+
+@Bean
+public SendForwardFilter sendForwardFilter() {
+    return new SendForwardFilter();
+}
+```
+
+处理
+
+com.netflix.zuul.http.ZuulServlet#service
+
+```java
+public void service(ServletRequest servletRequest, ServletResponse servletResponse) throws ServletException, IOException {
+    try {
+        this.init((HttpServletRequest)servletRequest, (HttpServletResponse)servletResponse);
+        RequestContext context = RequestContext.getCurrentContext();
+        context.setZuulEngineRan();
+
+        try { 
+            this.preRoute(); //前置处理
+        } catch (ZuulException var13) {
+            this.error(var13);
+            this.postRoute();
+            return;
+        }
+
+        try {
+            this.route(); //处理请求
+        } catch (ZuulException var12) {
+            this.error(var12);
+            this.postRoute();
+            return;
+        }
+
+        try {
+            this.postRoute(); //后置处理
+        } catch (ZuulException var11) {
+            this.error(var11);
+        }
+    } catch (Throwable var14) {
+        this.error(new ZuulException(var14, 500, "UNHANDLED_EXCEPTION_" + var14.getClass().getName())); //处理error
+    } finally {
+        RequestContext.getCurrentContext().unset();
+    }
+}
+```
+
+org.springframework.cloud.netflix.zuul.filters.route.RibbonRoutingFilter#run
+
+```java
+public Object run() {
+    RequestContext context = RequestContext.getCurrentContext();
+    this.helper.addIgnoredHeaders(new String[0]);
+
+    try {
+        RibbonCommandContext commandContext = this.buildCommandContext(context);
+        ClientHttpResponse response = this.forward(commandContext);
+        this.setResponse(response);
+        return response;
+    } catch (ZuulException var4) {
+        throw new ZuulRuntimeException(var4);
+    } catch (Exception var5) {
+        throw new ZuulRuntimeException(var5);
+    }
+}
+```
+
+https://docs.spring.io/spring-cloud-commons/docs/current/reference/html/#spring-cloud-loadbalancer
+
+官网文档总结
+
+应用程序初始化时，就加载LoadBalancer contexts
+
+Spring Cloud LoadBalancer为每个服务创建一个单独的Spring子上下文。默认情况下，只有每第一次对服务发起远程调用时，这些上下文才会初始化
+
+```yaml
+ribbon:
+	eager-load:
+    enabled: true #是否提前初始化
+    clients:  #指定服务名称
+```
+
+
+
+# 自定义健康检测
+
+eureka.client.healthcheck.enabled=true
+
+org.springframework.cloud.netflix.eureka.EurekaDiscoveryClientConfiguration.EurekaHealthCheckHandlerConfiguration
 
 ```java
 @Configuration
-@ConditionalOnClass(RestTemplate.class)
-@ConditionalOnBean(LoadBalancerClient.class)
-@EnableConfigurationProperties(LoadBalancerRetryProperties.class)
-public class LoadBalancerAutoConfiguration {
+@ConditionalOnProperty(
+    value = {"eureka.client.healthcheck.enabled"},
+    matchIfMissing = false
+)
+protected static class EurekaHealthCheckHandlerConfiguration {
+    @Autowired(
+        required = false
+    )
+    private HealthAggregator healthAggregator = new OrderedHealthAggregator();
 
-   //存放标有LoadBalanced注解的RestTemplate
-   @LoadBalanced
-   @Autowired(required = false)
-   private List<RestTemplate> restTemplates = Collections.emptyList();
-
-  //注入RestTemplateCustomizer，创建SmartInitializingSingleton，增强RestTemplate
-   @Bean
-   public SmartInitializingSingleton loadBalancedRestTemplateInitializerDeprecated(
-         final ObjectProvider<List<RestTemplateCustomizer>> restTemplateCustomizers) {
-      return () -> restTemplateCustomizers.ifAvailable(customizers -> {
-            for (RestTemplate restTemplate : LoadBalancerAutoConfiguration.this.restTemplates) {
-                for (RestTemplateCustomizer customizer : customizers) {
-                    customizer.customize(restTemplate);
-                }
-            }
-        });
-   }
-
-   @Autowired(required = false)
-   private List<LoadBalancerRequestTransformer> transformers = Collections.emptyList();
-
-  
-   //注入LoadBalancerClient（在RibbonAutoConfiguration中生成）创建LoadBalancerRequestFactory，用于创建LoadBalancerReques
-   @Bean
-   @ConditionalOnMissingBean
-   public LoadBalancerRequestFactory loadBalancerRequestFactory(
-         LoadBalancerClient loadBalancerClient) {
-      return new LoadBalancerRequestFactory(loadBalancerClient, transformers);
-   }
-
-  //在缺失RetryTemplate的情况下才会进行实例化
-   @Configuration
-   @ConditionalOnMissingClass("org.springframework.retry.support.RetryTemplate")
-   static class LoadBalancerInterceptorConfig {
-     
-     //创建拦截器LoadBalancerInterceptor
-      @Bean
-      public LoadBalancerInterceptor ribbonInterceptor(
-            LoadBalancerClient loadBalancerClient,
-            LoadBalancerRequestFactory requestFactory) {
-         return new LoadBalancerInterceptor(loadBalancerClient, requestFactory);
-      }
-
-     //注入拦截器，创建RestTemplateCustomizer，负责将拦截器注入到RestTemplate
-      @Bean
-      @ConditionalOnMissingBean
-      public RestTemplateCustomizer restTemplateCustomizer(
-            final LoadBalancerInterceptor loadBalancerInterceptor) {
-         return restTemplate -> {
-                List<ClientHttpRequestInterceptor> list = new ArrayList<>(
-                        restTemplate.getInterceptors());
-                list.add(loadBalancerInterceptor);
-                restTemplate.setInterceptors(list);
-            };
-      }
-   }
-
-  //以下与RetryTemplate相关
-   @Configuration
-   @ConditionalOnClass(RetryTemplate.class)
-   public static class RetryAutoConfiguration {
-
-      @Bean
-      @ConditionalOnMissingBean
-      public LoadBalancedRetryFactory loadBalancedRetryFactory() {
-         return new LoadBalancedRetryFactory() {};
-      }
-   }
-
-   @Configuration
-   @ConditionalOnClass(RetryTemplate.class)
-   public static class RetryInterceptorAutoConfiguration {
-      @Bean
-      @ConditionalOnMissingBean
-      public RetryLoadBalancerInterceptor ribbonInterceptor(
-            LoadBalancerClient loadBalancerClient, LoadBalancerRetryProperties properties,
-            LoadBalancerRequestFactory requestFactory,
-            LoadBalancedRetryFactory loadBalancedRetryFactory) {
-         return new RetryLoadBalancerInterceptor(loadBalancerClient, properties,
-               requestFactory, loadBalancedRetryFactory);
-      }
-
-      @Bean
-      @ConditionalOnMissingBean
-      public RestTemplateCustomizer restTemplateCustomizer(
-            final RetryLoadBalancerInterceptor loadBalancerInterceptor) {
-         return restTemplate -> {
-                List<ClientHttpRequestInterceptor> list = new ArrayList<>(
-                        restTemplate.getInterceptors());
-                list.add(loadBalancerInterceptor);
-                restTemplate.setInterceptors(list);
-            };
-      }
-   }
-
-```
-
-
-
-### SmartInitializingSingleton
-
-给集合中的每一个Resttemplate对象添加一个拦截器
-
-```java
-@Bean
-public SmartInitializingSingleton loadBalancedRestTemplateInitializerDeprecated(
-      final ObjectProvider<List<RestTemplateCustomizer>> restTemplateCustomizers) {
-   return () -> restTemplateCustomizers.ifAvailable(customizers -> {
-           for (RestTemplate restTemplate : LoadBalancerAutoConfiguration.this.restTemplates) {
-               for (RestTemplateCustomizer customizer : customizers) {
-                   customizer.customize(restTemplate);
-               }
-           }
-       });
-}
-```
-
-### LoadBalancerInterceptor
-
-```java
-@Bean
-public LoadBalancerInterceptor ribbonInterceptor(
-      LoadBalancerClient loadBalancerClient,
-      LoadBalancerRequestFactory requestFactory) {
-   return new LoadBalancerInterceptor(loadBalancerClient, requestFactory);
-}
-```
-
-### RestTemplateCustomizer
-
-为RestTemplate添加负载均衡拦截器
-
-```java
-@Bean
-@ConditionalOnMissingBean
-public RestTemplateCustomizer restTemplateCustomizer(
-      final LoadBalancerInterceptor loadBalancerInterceptor) {
-   return restTemplate -> {
-              List<ClientHttpRequestInterceptor> list = new ArrayList<>(
-                      restTemplate.getInterceptors());
-              list.add(loadBalancerInterceptor);
-              restTemplate.setInterceptors(list);
-          };
-}
-```
-
-### LoadBalancerRequestFactory
-
-创建LoadBalancerRequest
-
-```java
-@Bean
-@ConditionalOnMissingBean
-public LoadBalancerRequestFactory loadBalancerRequestFactory(
-      LoadBalancerClient loadBalancerClient) {
-   return new LoadBalancerRequestFactory(loadBalancerClient, transformers);
-}
-
-```
-
-```java
-public LoadBalancerRequest<ClientHttpResponse> createRequest(final HttpRequest request,
-      final byte[] body, final ClientHttpRequestExecution execution) {
-   return instance -> {
-           HttpRequest serviceRequest = new ServiceRequestWrapper(request, instance, loadBalancer);
-           if (transformers != null) {
-               for (LoadBalancerRequestTransformer transformer : transformers) {
-                   serviceRequest = transformer.transformRequest(serviceRequest, instance);
-               }
-           }
-           return execution.execute(serviceRequest, body);
-       };
-}
-```
-
-## 执行流程
-
-### 预先注入拦截器
-
-```java
-public void setInterceptors(List<ClientHttpRequestInterceptor> interceptors) {
-   // Take getInterceptors() List as-is when passed in here
-   if (this.interceptors != interceptors) {
-      this.interceptors.clear();
-      this.interceptors.addAll(interceptors); //注入拦截器LoadBalancerInterceptor
-      AnnotationAwareOrderComparator.sort(this.interceptors);
-   }
-}
-```
-
-### 执行
-
-org.springframework.web.client.RestTemplate#doExecute
-
-```java
-protected <T> T doExecute(URI url, @Nullable HttpMethod method, @Nullable RequestCallback requestCallback,
-      @Nullable ResponseExtractor<T> responseExtractor) throws RestClientException {
-
-   Assert.notNull(url, "URI is required");
-   Assert.notNull(method, "HttpMethod is required");
-   ClientHttpResponse response = null;
-   try {
-     	//创建LoadBalancerRequest
-      ClientHttpRequest request = createRequest(url, method);
-      if (requestCallback != null) {
-         requestCallback.doWithRequest(request);
-      }
-     //调用LoadBalancerRequest
-      response = request.execute();
-      handleResponse(url, method, response);
-      return (responseExtractor != null ? responseExtractor.extractData(response) : null);
-   }
-   catch (IOException ex) {
-      String resource = url.toString();
-      String query = url.getRawQuery();
-      resource = (query != null ? resource.substring(0, resource.indexOf('?')) : resource);
-      throw new ResourceAccessException("I/O error on " + method.name() +
-            " request for \"" + resource + "\": " + ex.getMessage(), ex);
-   }
-   finally {
-      if (response != null) {
-         response.close();
-      }
-   }
-}
-```
-
-#### 创建请求
-
-```java
-protected ClientHttpRequest createRequest(URI url, HttpMethod method) throws IOException {
-   ClientHttpRequest request = getRequestFactory().createRequest(url, method);
-   if (logger.isDebugEnabled()) {
-      logger.debug("Created " + method.name() + " request for \"" + url + "\"");
-   }
-   return request;
-}
-```
-
-##### 获取请求工厂
-
-```java
-public ClientHttpRequestFactory getRequestFactory() { //获取
-   List<ClientHttpRequestInterceptor> interceptors = getInterceptors(); //获取注入的拦截器
-   if (!CollectionUtils.isEmpty(interceptors)) {
-      ClientHttpRequestFactory factory = this.interceptingRequestFactory;
-      if (factory == null) { //创建InterceptingClientHttpRequestFactory
-         factory = new InterceptingClientHttpRequestFactory(super.getRequestFactory(), interceptors);
-         this.interceptingRequestFactory = factory;
-      }
-      return factory;
-   }
-   else {
-      return super.getRequestFactory();
-   }
-}
-```
-
-##### 创建请求
-
-org.springframework.http.client.InterceptingClientHttpRequestFactory#createRequest
-
-```java
-protected ClientHttpRequest createRequest(URI uri, HttpMethod httpMethod, ClientHttpRequestFactory requestFactory) {
-   return new InterceptingClientHttpRequest(requestFactory, this.interceptors, uri, httpMethod);
-}
-```
-
-#### 真正执行
-
-org.springframework.http.client.InterceptingClientHttpRequest#executeInternal
-
-```java
-protected final ClientHttpResponse executeInternal(HttpHeaders headers, byte[] bufferedOutput) throws IOException {
-   InterceptingRequestExecution requestExecution = new InterceptingRequestExecution();
-   return requestExecution.execute(this, bufferedOutput);
-}
-```
-
-org.springframework.http.client.InterceptingClientHttpRequest.InterceptingRequestExecution#execute
-
-```java
-public ClientHttpResponse execute(HttpRequest request, byte[] body) throws IOException {
-   if (this.iterator.hasNext()) { //执行拦截器
-      ClientHttpRequestInterceptor nextInterceptor = this.iterator.next();
-      return nextInterceptor.intercept(request, body, this);
-   }
-   else {
-      HttpMethod method = request.getMethod();
-      Assert.state(method != null, "No standard HTTP method");
-      ClientHttpRequest delegate = requestFactory.createRequest(request.getURI(), method);
-      request.getHeaders().forEach((key, value) -> delegate.getHeaders().addAll(key, value));
-      if (body.length > 0) {
-         if (delegate instanceof StreamingHttpOutputMessage) {
-            StreamingHttpOutputMessage streamingOutputMessage = (StreamingHttpOutputMessage) delegate;
-            streamingOutputMessage.setBody(outputStream -> StreamUtils.copy(body, outputStream));
-         }
-         else {
-            StreamUtils.copy(body, delegate.getBody());
-         }
-      }
-      return delegate.execute();
-   }
-}
-```
-
-org.springframework.cloud.client.loadbalancer.LoadBalancerInterceptor#intercept
-
-```java
-public ClientHttpResponse intercept(final HttpRequest request, final byte[] body,
-      final ClientHttpRequestExecution execution) throws IOException {
-   final URI originalUri = request.getURI();
-   String serviceName = originalUri.getHost();
-   Assert.state(serviceName != null, "Request URI does not contain a valid hostname: " + originalUri);
-   return this.loadBalancer.execute(serviceName, requestFactory.createRequest(request, body, execution));
-}
-```
-
-```java
-public LoadBalancerRequest<ClientHttpResponse> createRequest(final HttpRequest request,
-      final byte[] body, final ClientHttpRequestExecution execution) {
-   return instance -> {
-           HttpRequest serviceRequest = new ServiceRequestWrapper(request, instance, loadBalancer);
-           if (transformers != null) {
-               for (LoadBalancerRequestTransformer transformer : transformers) {
-                   serviceRequest = transformer.transformRequest(serviceRequest, instance);
-               }
-           }
-           return execution.execute(serviceRequest, body);
-       };
-}
-```
-
-org.springframework.cloud.netflix.ribbon.RibbonLoadBalancerClient#execute
-
-```java
-public <T> T execute(String serviceId, LoadBalancerRequest<T> request) throws IOException {
-   //获取负载均衡器
-  	ILoadBalancer loadBalancer = this.getLoadBalancer(serviceId);
-   //通过负载均衡器选择发送请求的服务实例
-    Server server = this.getServer(loadBalancer);
-    if (server == null) {
-        throw new IllegalStateException("No instances available for " + serviceId);
-    } else {
-        //发送请求
-        RibbonLoadBalancerClient.RibbonServer ribbonServer = new RibbonLoadBalancerClient.RibbonServer(serviceId, server, this.isSecure(server, serviceId), this.serverIntrospector(serviceId).getMetadata(server));
-        return this.execute(serviceId, ribbonServer, request);
-    }
-}
-```
-
-```java
-public <T> T execute(String serviceId, ServiceInstance serviceInstance, LoadBalancerRequest<T> request) throws IOException {
-    Server server = null;
-    if (serviceInstance instanceof RibbonLoadBalancerClient.RibbonServer) {
-        server = ((RibbonLoadBalancerClient.RibbonServer)serviceInstance).getServer();
+    protected EurekaHealthCheckHandlerConfiguration() {
     }
 
-    if (server == null) {
-        throw new IllegalStateException("No instances available for " + serviceId);
-    } else {
-        RibbonLoadBalancerContext context = this.clientFactory.getLoadBalancerContext(serviceId);
-        RibbonStatsRecorder statsRecorder = new RibbonStatsRecorder(context, server);
-
-        try {
-          //发送请求
-            T returnVal = request.apply(serviceInstance);
-            statsRecorder.recordStats(returnVal);
-            return returnVal;
-        } catch (IOException var8) {
-            statsRecorder.recordStats(var8);
-            throw var8;
-        } catch (Exception var9) {
-            statsRecorder.recordStats(var9);
-            ReflectionUtils.rethrowRuntimeException(var9);
-            return null;
-        }
+    @Bean
+    @ConditionalOnMissingBean({HealthCheckHandler.class})
+    public EurekaHealthCheckHandler eurekaHealthCheckHandler() {
+        return new EurekaHealthCheckHandler(this.healthAggregator);
     }
-}
+
 ```
 
-org.springframework.http.client.InterceptingClientHttpRequest.InterceptingRequestExecution#execute
+会将com.netflix.appinfo.HealthCheckHandler注入到DiscoveryClient
+
+也会将com.netflix.discovery.InstanceInfoReplicator注入到DiscoveryClient
+
+com.netflix.discovery.InstanceInfoReplicator#run
 
 ```java
-public ClientHttpResponse execute(HttpRequest request, byte[] body) throws IOException {
-   if (this.iterator.hasNext()) { //ClientHttpRequestInterceptor的迭代器，是否还有未迭代的
-      ClientHttpRequestInterceptor nextInterceptor = this.iterator.next();
-      return nextInterceptor.intercept(request, body, this);
-   }
-   else {//拦截器迭代结束
-      HttpMethod method = request.getMethod();
-      Assert.state(method != null, "No standard HTTP method");
-     //创建ClientHttpRequest
-      ClientHttpRequest delegate = requestFactory.createRequest(request.getURI(), method);
-      request.getHeaders().forEach((key, value) -> delegate.getHeaders().addAll(key, value));
-      if (body.length > 0) {
-         if (delegate instanceof StreamingHttpOutputMessage) {
-            StreamingHttpOutputMessage streamingOutputMessage = (StreamingHttpOutputMessage) delegate;
-            streamingOutputMessage.setBody(outputStream -> StreamUtils.copy(body, outputStream));
-         }
-         else {
-            StreamUtils.copy(body, delegate.getBody());
-         }
-      }
-      return delegate.execute(); //发送请求
-   }
-}
-```
-
-org.springframework.cloud.netflix.ribbon.RibbonHttpRequest#executeInternal
-
-```java
-protected ClientHttpResponse executeInternal(HttpHeaders headers) throws IOException {
+public void run() {
     try {
-        this.addHeaders(headers);
-        if (this.outputStream != null) {
-            this.outputStream.close();
-            this.builder.entity(this.outputStream.toByteArray());
-        }
+      //刷新服务提供者的信息
+        discoveryClient.refreshInstanceInfo();
 
-        HttpRequest request = this.builder.build();
-        HttpResponse response = (HttpResponse)this.client.executeWithLoadBalancer(request, this.config);
-        return new RibbonHttpResponse(response);
-    } catch (Exception var4) {
-        throw new IOException(var4);
+        Long dirtyTimestamp = instanceInfo.isDirtyWithTime();
+        if (dirtyTimestamp != null) {
+            discoveryClient.register();
+            instanceInfo.unsetIsDirty(dirtyTimestamp);
+        }
+    } catch (Throwable t) {
+        logger.warn("There was a problem with the instance info replicator", t);
+    } finally {
+        Future next = scheduler.schedule(this, replicationIntervalSeconds, TimeUnit.SECONDS);
+        scheduledPeriodicRef.set(next);
     }
 }
 ```
 
-# Feign
-
-## 组件
-
-### EnableFeignClients
-
-启动Feign
+com.netflix.discovery.DiscoveryClient#refreshInstanceInfo
 
 ```java
-@Retention(RetentionPolicy.RUNTIME)
-@Target({ElementType.TYPE})
-@Documented
-@Import({FeignClientsRegistrar.class})
-public @interface EnableFeignClients {
-    String[] value() default {};
+void refreshInstanceInfo() {
+    applicationInfoManager.refreshDataCenterInfoIfRequired();
+    applicationInfoManager.refreshLeaseInfoIfRequired();
 
-    String[] basePackages() default {};
-
-    Class<?>[] basePackageClasses() default {};
-
-    Class<?>[] defaultConfiguration() default {};
-
-    Class<?>[] clients() default {};
-}
-```
-
-### FeignClientsRegistrar
-
-向容器中注册Feign相关的配置类、接口类
-
-org.springframework.cloud.openfeign.FeignClientsRegistrar#registerBeanDefinitions
-
-```java
-public void registerBeanDefinitions(AnnotationMetadata metadata, BeanDefinitionRegistry registry) {
-    this.registerDefaultConfiguration(metadata, registry);
-    this.registerFeignClients(metadata, registry);
-}
-```
-
-### FeignClientSpecification
-
-注册FeignClient的全局配置到容器中
-
-org.springframework.cloud.openfeign.FeignClientsRegistrar#registerDefaultConfiguration
-
-```java
-private void registerDefaultConfiguration(AnnotationMetadata metadata, BeanDefinitionRegistry registry) {
-    Map<String, Object> defaultAttrs = metadata.getAnnotationAttributes(EnableFeignClients.class.getName(), true);
-    if (defaultAttrs != null && defaultAttrs.containsKey("defaultConfiguration")) {
-        String name;
-        if (metadata.hasEnclosingClass()) {
-            name = "default." + metadata.getEnclosingClassName();
-        } else {
-            name = "default." + metadata.getClassName();
-        }
-
-        this.registerClientConfiguration(registry, name, defaultAttrs.get("defaultConfiguration"));
+    InstanceStatus status;
+    try {
+      //调用自定义的状态检测
+        status = getHealthCheckHandler().getStatus(instanceInfo.getStatus());
+    } catch (Exception e) {
+        logger.warn("Exception from healthcheckHandler.getStatus, setting status to DOWN", e);
+        status = InstanceStatus.DOWN;
     }
 
+  //发布事件：状态变更
+    if (null != status) {
+        applicationInfoManager.setInstanceStatus(status);
+    }
 }
 ```
 
 ```java
-private void registerClientConfiguration(BeanDefinitionRegistry registry, Object name, Object configuration) {
-    BeanDefinitionBuilder builder = BeanDefinitionBuilder.genericBeanDefinition(FeignClientSpecification.class);
-    builder.addConstructorArgValue(name);
-    builder.addConstructorArgValue(configuration);
-    registry.registerBeanDefinition(name + "." + FeignClientSpecification.class.getSimpleName(), builder.getBeanDefinition());
-}
-```
-
-### FeignClientFactoryBean
-
-为标有FeignClient注解的接口生成代理对象
-
-```java
-public void registerFeignClients(AnnotationMetadata metadata,
-      BeanDefinitionRegistry registry) {//扫描标有FeignClient注解的接口，注册到容器
-   ClassPathScanningCandidateComponentProvider scanner = getScanner();
-   scanner.setResourceLoader(this.resourceLoader);
-
-   Set<String> basePackages;
-
-   Map<String, Object> attrs = metadata
-         .getAnnotationAttributes(EnableFeignClients.class.getName());
-   AnnotationTypeFilter annotationTypeFilter = new AnnotationTypeFilter(
-         FeignClient.class);
-  //标有FeignClient注解的接口
-   final Class<?>[] clients = attrs == null ? null
-         : (Class<?>[]) attrs.get("clients");
-   if (clients == null || clients.length == 0) {
-      scanner.addIncludeFilter(annotationTypeFilter);
-      basePackages = getBasePackages(metadata);
-   }
-   else {//获取包名
-      final Set<String> clientClasses = new HashSet<>();
-      basePackages = new HashSet<>();
-      for (Class<?> clazz : clients) {
-         basePackages.add(ClassUtils.getPackageName(clazz));
-         clientClasses.add(clazz.getCanonicalName());
-      }
-      AbstractClassTestingTypeFilter filter = new AbstractClassTestingTypeFilter() {
-         @Override
-         protected boolean match(ClassMetadata metadata) {
-            String cleaned = metadata.getClassName().replaceAll("\\$", ".");
-            return clientClasses.contains(cleaned);
-         }
-      };
-      scanner.addIncludeFilter(
-            new AllTypeFilter(Arrays.asList(filter, annotationTypeFilter)));
-   }
-	 //扫描每个包下标有FeignClient注解的接口
-   for (String basePackage : basePackages) {
-      Set<BeanDefinition> candidateComponents = scanner
-            .findCandidateComponents(basePackage);
-      for (BeanDefinition candidateComponent : candidateComponents) {
-         if (candidateComponent instanceof AnnotatedBeanDefinition) {
-            // FeignClient只能用在接口上
-            AnnotatedBeanDefinition beanDefinition = (AnnotatedBeanDefinition) candidateComponent;
-            AnnotationMetadata annotationMetadata = beanDefinition.getMetadata();
-            Assert.isTrue(annotationMetadata.isInterface(),
-                  "@FeignClient can only be specified on an interface");
-						//获取注解的属性值
-            Map<String, Object> attributes = annotationMetadata
-                  .getAnnotationAttributes(
-                        FeignClient.class.getCanonicalName());
-						//服务名称
-            String name = getClientName(attributes);
-           //注册独享的FeignClient配置信息
-            registerClientConfiguration(registry, name,
-                  attributes.get("configuration"));
-					 //注册FeignClientFactoryBean
-            registerFeignClient(registry, annotationMetadata, attributes);
-         }
-      }
-   }
-}
-```
-
-```java
-private void registerFeignClient(BeanDefinitionRegistry registry,
-      AnnotationMetadata annotationMetadata, Map<String, Object> attributes) {//注册FeignClientFactoryBean
-   String className = annotationMetadata.getClassName();
-   BeanDefinitionBuilder definition = BeanDefinitionBuilder
-         .genericBeanDefinition(FeignClientFactoryBean.class);
-   validate(attributes);
-    //填充属性信息
-   definition.addPropertyValue("url", getUrl(attributes)); //指定固定服务实例的地址，用于测试环境中，不需要负载均衡功能
-   definition.addPropertyValue("path", getPath(attributes));
-   String name = getName(attributes);
-   definition.addPropertyValue("name", name);
-   definition.addPropertyValue("type", className);
-   definition.addPropertyValue("decode404", attributes.get("decode404"));
-   definition.addPropertyValue("fallback", attributes.get("fallback"));
-   definition.addPropertyValue("fallbackFactory", attributes.get("fallbackFactory"));
-   definition.setAutowireMode(AbstractBeanDefinition.AUTOWIRE_BY_TYPE);
-
-   String alias = name + "FeignClient";
-   AbstractBeanDefinition beanDefinition = definition.getBeanDefinition();
-
-   boolean primary = (Boolean)attributes.get("primary"); // has a default, won't be null
-
-   beanDefinition.setPrimary(primary);
-
-   String qualifier = getQualifier(attributes);
-   if (StringUtils.hasText(qualifier)) {
-      alias = qualifier;
-   }
-
-   BeanDefinitionHolder holder = new BeanDefinitionHolder(beanDefinition, className,
-         new String[] { alias });
-   BeanDefinitionReaderUtils.registerBeanDefinition(holder, registry);
-}
-```
-
-## 获取代理对象
-
-org.springframework.cloud.openfeign.FeignClientFactoryBean#getObject
-
-```java
-public Object getObject() throws Exception {
-   FeignContext context = applicationContext.getBean(FeignContext.class);
-   Feign.Builder builder = feign(context);
-
-   if (!StringUtils.hasText(this.url)) { //url为空
-      String url;
-      if (!this.name.startsWith("http")) {
-         url = "http://" + this.name;
-      }
-      else {
-         url = this.name;
-      }
-      url += cleanPath();
-      //具有负载均衡功能
-      return loadBalance(builder, context, new HardCodedTarget<>(this.type,
-            this.name, url));
-   }
-  //url不为空，表明固定访问某一服务实例
-   if (StringUtils.hasText(this.url) && !this.url.startsWith("http")) {
-      this.url = "http://" + this.url;
-   }
-   String url = this.url + cleanPath();
-   Client client = getOptional(context, Client.class);
-   if (client != null) {
-      if (client instanceof LoadBalancerFeignClient) {
-         // not lod balancing because we have a url,
-         // but ribbon is on the classpath, so unwrap
-         client = ((LoadBalancerFeignClient)client).getDelegate();
-      }
-      builder.client(client);
-   }
-   Targeter targeter = get(context, Targeter.class);
-   return targeter.target(this, builder, context, new HardCodedTarget<>(
-         this.type, this.name, url));
-}
-```
-
-org.springframework.cloud.openfeign.FeignClientFactoryBean#loadBalance
-
-```java
-protected <T> T loadBalance(Feign.Builder builder, FeignContext context,
-      HardCodedTarget<T> target) {
-   Client client = getOptional(context, Client.class);
-   if (client != null) {
-      builder.client(client);
-      Targeter targeter = get(context, Targeter.class);
-     //生成代理对象
-      return targeter.target(this, builder, context, target);
-   }
-
-   throw new IllegalStateException(
-         "No Feign Client for loadBalancing defined. Did you forget to include spring-cloud-starter-netflix-ribbon?");
-}
-```
-
-生成代理对象
-
-org.springframework.cloud.openfeign.DefaultTargeter#target
-
-```java
-public <T> T target(FeignClientFactoryBean factory, Feign.Builder feign, FeignContext context,
-               Target.HardCodedTarget<T> target) {
-   return feign.target(target);
-}
-```
-
-feign.Feign.Builder#target(feign.Target<T>)
-
-```java
-public <T> T target(Target<T> target) {
-    return this.build().newInstance(target);
-}
-```
-
-feign.ReflectiveFeign#newInstance
-
-```java
-public <T> T newInstance(Target<T> target) {
-    Map<String, MethodHandler> nameToHandler = this.targetToHandlersByName.apply(target);
-    Map<Method, MethodHandler> methodToHandler = new LinkedHashMap();
-    List<DefaultMethodHandler> defaultMethodHandlers = new LinkedList();
-    Method[] var5 = target.type().getMethods();
-    int var6 = var5.length;
-
-    for(int var7 = 0; var7 < var6; ++var7) {
-        Method method = var5[var7];
-        if (method.getDeclaringClass() != Object.class) {
-            if (Util.isDefault(method)) {
-                DefaultMethodHandler handler = new DefaultMethodHandler(method);
-                defaultMethodHandlers.add(handler);
-                methodToHandler.put(method, handler);
-            } else {
-                methodToHandler.put(method, (MethodHandler)nameToHandler.get(Feign.configKey(target.type(), method)));
+public synchronized void setInstanceStatus(InstanceStatus status) {
+    InstanceStatus next = instanceStatusMapper.map(status);
+    if (next == null) {
+        return;
+    }
+		//修改instanceInfo的status属性，
+  	//DiscoveryClient销毁的时候也会调用此方法
+    InstanceStatus prev = instanceInfo.setStatus(next);
+    if (prev != null) {
+        for (StatusChangeListener listener : listeners.values()) {
+            try {
+                listener.notify(new StatusChangeEvent(prev, next));
+            } catch (Exception e) {
+                logger.warn("failed to notify listener: {}", listener.getId(), e);
             }
         }
     }
-
-    InvocationHandler handler = this.factory.create(target, methodToHandler);
-  //创建代理对象
-    T proxy = Proxy.newProxyInstance(target.type().getClassLoader(), new Class[]{target.type()}, handler);
-    Iterator var12 = defaultMethodHandlers.iterator();
-
-    while(var12.hasNext()) {
-        DefaultMethodHandler defaultMethodHandler = (DefaultMethodHandler)var12.next();
-        defaultMethodHandler.bindTo(proxy);
-    }
-
-    return proxy;
 }
 ```
 
+```java
+//DiscoveryClient构造函数中创建
+statusChangeListener = new ApplicationInfoManager.StatusChangeListener() {
+    @Override
+    public String getId() {
+        return "statusChangeListener";
+    }
+
+    @Override
+    public void notify(StatusChangeEvent statusChangeEvent) {
+        if (InstanceStatus.DOWN == statusChangeEvent.getStatus() ||
+                InstanceStatus.DOWN == statusChangeEvent.getPreviousStatus()) {
+            logger.warn("Saw local status change event {}", statusChangeEvent);
+        } else {
+            logger.info("Saw local status change event {}", statusChangeEvent);
+        }
+        instanceInfoReplicator.onDemandUpdate();
+    }
+};
+```
+
+自定义HealthIndicator，实现doHealthCheck方法
+
+org.springframework.cloud.netflix.eureka.EurekaHealthCheckHandler#afterPropertiesSet
+
+```java
+public void afterPropertiesSet() throws Exception {
+  //获取所有实现接口HealthIndicator的bean
+    Map<String, HealthIndicator> healthIndicators = this.applicationContext.getBeansOfType(HealthIndicator.class);
+    Iterator var2 = healthIndicators.entrySet().iterator();
+
+    while(true) {
+        while(var2.hasNext()) {
+            Entry<String, HealthIndicator> entry = (Entry)var2.next();
+            
+            if (entry.getValue() instanceof DiscoveryCompositeHealthIndicator) {
+                DiscoveryCompositeHealthIndicator indicator = (DiscoveryCompositeHealthIndicator)entry.getValue();
+                Iterator var5 = indicator.getHealthIndicators().iterator();
+
+                while(var5.hasNext()) {
+                    Holder holder = (Holder)var5.next();
+                    if (!(holder.getDelegate() instanceof EurekaHealthIndicator)) {
+                        this.healthIndicator.addHealthIndicator(holder.getDelegate().getName(), holder);
+                    }
+                }
+            } else {
+              	//healthIndicator为CompositeHealthIndicator
+              //负责组合所有实现healthIndicator接口的bean
+                this.healthIndicator.addHealthIndicator((String)entry.getKey(), (HealthIndicator)entry.getValue());
+            }
+        }
+
+        return;
+    }
+}
+```
+
+org.springframework.cloud.netflix.eureka.EurekaHealthCheckHandler#getHealthStatus
+
+```java
+protected InstanceStatus getHealthStatus() {
+    Status status = this.healthIndicator.health().getStatus();
+    return this.mapToInstanceStatus(status);
+}
+```
+
+```java
+protected InstanceStatus mapToInstanceStatus(Status status) {
+    return !STATUS_MAPPING.containsKey(status) ? InstanceStatus.UNKNOWN : (InstanceStatus)STATUS_MAPPING.get(status);
+}
+```
+
+org.springframework.boot.actuate.health.CompositeHealthIndicator#health
+
+```java
+public Health health() {
+    Map<String, Health> healths = new LinkedHashMap();
+    Iterator var2 = this.indicators.entrySet().iterator();
+		//逐个调用
+    while(var2.hasNext()) {
+        Entry<String, HealthIndicator> entry = (Entry)var2.next();
+      	//调用自定义的health方法
+        healths.put(entry.getKey(), ((HealthIndicator)entry.getValue()).health());
+    }
+
+    return this.healthAggregator.aggregate(healths);
+}
+```
+
+org.springframework.boot.actuate.health.OrderedHealthAggregator#aggregateStatus
+
+```java
+public OrderedHealthAggregator() {
+    this.setStatusOrder(Status.DOWN, Status.OUT_OF_SERVICE, Status.UP, Status.UNKNOWN); //四种状态码
+}
+```
+
+```java
+protected Status aggregateStatus(List<Status> candidates) {
+    List<Status> filteredCandidates = new ArrayList();
+    Iterator var3 = candidates.iterator();
+
+    while(var3.hasNext()) {
+        Status candidate = (Status)var3.next();
+        if (this.statusOrder.contains(candidate.getCode())) {
+            filteredCandidates.add(candidate);
+        }
+    }
+
+    if (filteredCandidates.isEmpty()) {
+        return Status.UNKNOWN;
+    } else {
+      	//排序，DOWN排在前面
+        Collections.sort(filteredCandidates, new OrderedHealthAggregator.StatusComparator(this.statusOrder));
+        return (Status)filteredCandidates.get(0);
+    }
+}
+```
