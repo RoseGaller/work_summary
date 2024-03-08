@@ -1662,3 +1662,16 @@ https://gceasy.ycrash.cn/gc-index.jsp
 
 Until Java 8: **-XX:+PrintGCDetails -XX:+PrintGCDateStamps -Xloggc:<file-path>**
 Java 9 & above: -Xlog:gc*:file=<gc-log-file-path>
+
+**34. 类加载器按照层次，从顶层到底层，分别加载哪些类？**
+
+启动类加载器：负责将存放在JAVA_HOME/lib下的，或者被－Xbootclasspath参数所指定的路径中的，并且是虚拟机识别的类库加载到虚拟机内存中。启动类加载器无法被Java程序直接引用。
+
+扩展类加载器：这个加载器负责加载JAVA_HOME/lib/ext目录中的，或者被java.ext.dirs系统变量所指定的路径中的所有类库，开发者可以直接使用扩展类加载器
+
+应用程序类加载器：这个加载器是ClassLoader中getSystemClassLoader()方法的返回值，所以一般也称它为系统类加载器。它负责加载用户类路径（Classpath）上所指定的类库，可直接使用这个加载器，如果应用程序没有自定义自己的类加载器，一般情况下这个就是程序中默认的类加载器
+
+实现自己的加载器
+
+只需要继承ClassLoader，并覆盖findClass方法。
+在调用loadClass方法时，会先根据委派模型在父加载器中加载，如果加载失败，则会调用自己的findClass方法来完成加载
